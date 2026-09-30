@@ -13,10 +13,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 $name = 'WenchangCampusKeeper'
-$action = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $folder
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+$action = New-ScheduledTaskAction -Execute $exe -Argument '-quiet' -WorkingDirectory $folder
+$startup = New-ScheduledTaskTrigger -AtStartup
+$daily = New-ScheduledTaskTrigger -Daily -At '06:05'
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $name -Action $action -Trigger @($startup, $daily) -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 Write-Host "已注册开机任务 $name。"
 if ($StartNow) {
     Start-ScheduledTask -TaskName $name

@@ -2,456 +2,320 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"regexp"
-	"strings"
+	"syscall"
 	"time"
 )
 
 const (
-	checkInterval = 5 * time.Second
-	maxBackoff    = 5 * time.Minute
-	probeURL      = "http://www.msftconnecttest.com/connecttest.txt"
+	healthInterval = 20 * time.Second
+	linkInterval   = 5 * time.Second
+	statusInterval = 10 * time.Second
+	retryBase      = 5 * time.Second
+	retryMax       = 5 * time.Minute
 )
 
-type config struct {
-	account        string
-	password       string
-	portalURL      string
-	suffixExplicit bool
+type controller struct {
+	cfg          config
+	portal       *portalClient
+	logger       *log.Logger
+	quiet        bool
+	state        string
+	lastPortal   string
+	link         linkState
+	backoff      time.Duration
+	nextRetry    time.Time
+	retryTimer   *time.Timer
+	retryChannel <-chan time.Time
+	nextReset    time.Time
 }
-
-type keeper struct {
-	client     *http.Client
-	cfg        config
-	state      string
-	lastPortal string
-	checkCount uint64
-}
-
-var errLinkDown = errors.New("有线网络接口未就绪")
 
 func main() {
-	once := flag.Bool("once", false, "check and attempt login once, then exit")
+	quiet := flag.Bool("quiet", false, "only log changes and actions (for scheduled task)")
+	once := flag.Bool("once", false, "one check and one login attempt")
 	flag.Parse()
-	log.SetFlags(log.Ldate | log.Ltime)
 	exe, err := os.Executable()
 	if err != nil {
 		log.Fatal(err)
 	}
-	cfg, err := loadConfig(filepath.Join(filepath.Dir(exe), ".env"))
+	dir := filepath.Dir(exe)
+	cfg, err := loadConfig(filepath.Join(dir, ".env"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DisableKeepAlives = true
-	transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp4", addr)
-	}
-	k := keeper{cfg: cfg, client: &http.Client{
-		Timeout:       8 * time.Second,
-		Transport:     transport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
-	logPath := filepath.Join(filepath.Dir(exe), "keeper.log")
-	if info, err := os.Stat(logPath); err == nil && info.Size() > 5<<20 {
-		_ = os.Rename(logPath, logPath+".old")
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	writer, err := newRotatingLog(filepath.Join(dir, "keeper.log"), 5<<20)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer logFile.Close()
-	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
-	log.Printf("校园网守护进程启动，账号 %s，检测间隔 %s", mask(cfg.account), checkInterval)
-	backoff := 5 * time.Second
-	for {
-		if err := k.step(); err != nil {
-			if errors.Is(err, errLinkDown) {
-				if *once {
-					os.Exit(1)
-				}
-				backoff = 5 * time.Second
-				time.Sleep(checkInterval)
-				continue
-			}
-			log.Printf("连接未恢复：%v；%s 后重试", err, backoff)
-			if *once {
-				os.Exit(1)
-			}
-			if k.waitForRetry(jitter(backoff)) {
-				backoff = 5 * time.Second
-				continue
-			}
-			if backoff < maxBackoff {
-				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
-				}
-			}
-			continue
+	defer writer.Close()
+	logger := log.New(writer, "", log.Ldate|log.Ltime)
+	if err := acquireSingleInstance(); err != nil {
+		logger.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	c := &controller{
+		cfg: cfg, portal: newPortalClient(cfg), logger: logger,
+		quiet: *quiet, backoff: retryBase, retryTimer: time.NewTimer(time.Hour),
+	}
+	if !c.retryTimer.Stop() {
+		select {
+		case <-c.retryTimer.C:
+		default:
 		}
-		backoff = 5 * time.Second
-		if *once {
-			return
+	}
+	c.nextReset = nextSix(time.Now())
+	logger.Printf("校园网守护程序启动；账号 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), healthInterval, linkInterval)
+	if *once {
+		if err := c.cycle(ctx, "手动单次检测"); err != nil {
+			logger.Printf("本次检查未恢复：%v", err)
+			os.Exit(1)
 		}
-		time.Sleep(checkInterval)
+		return
+	}
+	if err := c.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Fatal(err)
 	}
 }
 
-func (k *keeper) step() error {
-	k.checkCount++
-	log.Printf("第 %d 次检测：正在检查 IPv4 外网", k.checkCount)
-	ok, redirect, err := k.online()
-	if ok {
-		if k.state != "online" && k.state != "" {
-			log.Print("当前状态：IPv4 外网已恢复")
-		} else {
-			log.Printf("当前状态：IPv4 外网正常；约 %s 后再次检测", checkInterval)
+func (c *controller) run(ctx context.Context) error {
+	networkEvents, closeNotifier, err := startNetworkNotifications()
+	if err != nil {
+		c.logger.Printf("Windows 网络通知不可用，使用 %s 链路核查兜底：%v", linkInterval, err)
+	}
+	linkChanges := make(chan linkState, 1)
+	monitorDone := make(chan struct{})
+	go func() { monitorLink(ctx, c.logger, networkEvents, linkChanges); close(monitorDone) }()
+	defer func() {
+		if closeNotifier != nil {
+			closeNotifier()
 		}
-		k.state = "online"
+		<-monitorDone
+	}()
+	healthTicker := time.NewTicker(healthInterval)
+	statusTicker := time.NewTicker(statusInterval)
+	sixTimer := time.NewTimer(time.Until(c.nextReset))
+	defer healthTicker.Stop()
+	defer statusTicker.Stop()
+	defer sixTimer.Stop()
+	defer c.retryTimer.Stop()
+	_ = c.cycle(ctx, "启动检查")
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.Print("收到停止信号，守护程序退出")
+			return ctx.Err()
+		case link := <-linkChanges:
+			if link != c.link {
+				c.link = link
+				_ = c.cycle(ctx, "有线接口变化")
+			}
+		case <-healthTicker.C:
+			c.resetAtSixIfDue()
+			_ = c.cycle(ctx, "定期外网检查")
+		case <-c.retryChannel:
+			c.retryChannel = nil
+			c.resetAtSixIfDue()
+			_ = c.cycle(ctx, "认证重试")
+		case <-statusTicker.C:
+			if c.resetAtSixIfDue() && c.state == "offline" {
+				_ = c.cycle(ctx, "06:00 退避清零")
+			}
+			if !c.quiet {
+				c.logger.Printf("当前状态：%s", c.status())
+			}
+		case <-sixTimer.C:
+			reset := c.resetAtSixIfDue()
+			sixTimer.Reset(time.Until(c.nextReset))
+			if reset && c.state == "offline" {
+				_ = c.cycle(ctx, "06:00 退避清零")
+			}
+		}
+	}
+}
+
+func (c *controller) cycle(ctx context.Context, reason string) error {
+	c.resetAtSixIfDue()
+	c.refreshLink()
+	if !c.link.ready() {
+		c.setState("link-down", fmt.Sprintf("有线接口未就绪（%s）；等待网线、网卡或 DHCP 恢复", c.link.describe()))
+		return errors.New("有线接口未就绪")
+	}
+	if !c.quiet {
+		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
+	}
+	result := c.portal.probe(ctx)
+	if result.online {
+		c.setState("online", "IPv4 外网已连通")
+		c.resetRetry()
 		return nil
 	}
-	log.Printf("当前状态：外网探测失败（第 1 次）：%s；2 秒后复核", probeReason(redirect, err))
-	// A second failed check avoids starting authentication for a single lost packet.
-	time.Sleep(2 * time.Second)
-	ok, redirect2, err2 := k.online()
-	if ok {
-		log.Print("当前状态：短暂异常后 IPv4 外网已恢复")
-		k.state = "online"
-		return nil
+	if result.redirect != "" {
+		c.lastPortal = result.redirect
 	}
-	if redirect2 != "" {
-		redirect = redirect2
-	}
-	wasLinkDown := k.state == "link-down"
-	log.Printf("当前状态：IPv4 外网中断（连续 2 次探测失败）：%s", probeReason(redirect, err2))
-	k.state = "offline"
-	if redirect != "" {
-		k.lastPortal = redirect
-	}
-	portal := redirect
-	if k.cfg.portalURL != "" {
-		portal = k.cfg.portalURL
-	}
-	if portal == "" {
-		portal = k.lastPortal
-	}
-	if !wiredLinkReady(portal) {
-		log.Printf("当前状态：有线网卡或网线未就绪；约 %s 后再次检测，暂不发送认证请求", checkInterval)
-		k.state = "link-down"
-		return errLinkDown
-	}
-	if wasLinkDown {
-		log.Print("有线接口已恢复，继续检查认证状态")
-		k.state = "offline"
-	}
-	if portal == "" {
-		portal, err = k.discoverPortal()
-		if err != nil {
-			return errors.New("有线接口已连接，但尚未发现认证入口")
+	// Confirm a first failure before sending credentials. Captive redirects
+	// are already a definitive sign of unauthenticated IPv4 access.
+	if result.redirect == "" {
+		if !c.quiet {
+			c.logger.Printf("外网探测异常，2 秒后复核：%s", result.reason)
 		}
-		k.lastPortal = portal
-	}
-	log.Printf("准备认证：%s", safePortal(portal))
-	if err := k.login(portal); err != nil {
-		return err
-	}
-	for i := 0; i < 5; i++ {
-		time.Sleep(3 * time.Second)
-		ok, _, err = k.online()
-		if ok {
-			log.Print("登录后确认外网恢复")
-			k.state = "online"
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+		second := c.portal.probe(ctx)
+		if second.online {
+			c.setState("online", "IPv4 外网已恢复")
+			c.resetRetry()
 			return nil
 		}
-	}
-	return errors.New("认证接口已响应，但 15 秒后 IPv4 外网仍不可用")
-}
-
-func (k *keeper) waitForRetry(delay time.Duration) bool {
-	deadline := time.Now().Add(delay)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
+		if second.redirect != "" {
+			c.lastPortal = second.redirect
 		}
-		pause := min(remaining, checkInterval)
-		log.Printf("当前状态：外网未恢复；认证退避剩余约 %s，%s 后复查状态", remaining.Round(time.Second), pause.Round(time.Second))
-		time.Sleep(pause)
-		if !wiredLinkReady(k.lastPortal) {
-			log.Print("当前状态：有线网卡或网线未就绪，继续等待")
-			continue
+		result = second
+	}
+	c.refreshLink()
+	if !c.link.ready() {
+		c.setState("link-down", "有线接口未就绪："+c.link.describe())
+		return errors.New("有线接口未就绪")
+	}
+	c.setState("offline", "IPv4 外网中断："+result.reason)
+	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
+		if !c.quiet {
+			c.logger.Printf("认证退避中，预计 %s 后重试", time.Until(c.nextRetry).Round(time.Second))
 		}
-		log.Print("退避期间正在检查 IPv4 外网")
-		ok, _, _ := k.online()
-		if ok {
-			log.Print("当前状态：IPv4 外网已恢复")
-			k.state = "online"
-			return true
-		}
-		log.Print("当前状态：IPv4 外网仍中断，等待下次认证尝试")
+		return errors.New("等待认证重试")
 	}
-}
-
-func (k *keeper) online() (bool, string, error) {
-	resp, err := k.client.Get(probeURL)
-	if err != nil {
-		if k.httpsOnline() {
-			return true, "", nil
-		}
-		return false, "", err
+	portal := c.lastPortal
+	if portal == "" {
+		portal = c.cfg.portalURL
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		loc, err := resp.Location()
-		if err == nil {
-			return false, loc.String(), nil
-		}
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 256))
-	if err != nil {
-		return false, "", err
-	}
-	if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(data)) == "Microsoft Connect Test" {
-		return true, "", nil
-	}
-	if k.httpsOnline() {
-		return true, "", nil
-	}
-	return false, "", fmt.Errorf("检测地址返回 HTTP %d，内容不是预期值", resp.StatusCode)
-}
-
-func (k *keeper) httpsOnline() bool {
-	resp, err := k.client.Get("https://www.baidu.com/")
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 400
-}
-
-func probeReason(redirect string, err error) string {
-	if redirect != "" {
-		return "HTTP 请求被重定向到校园网认证页"
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return "DNS 无法解析检测域名"
-	}
-	if err != nil {
-		return "检测地址暂时不可达"
-	}
-	return "检测地址返回了非预期内容"
-}
-
-func wiredLinkReady(portal string) bool {
-	expected := ""
-	if u, err := url.Parse(portal); err == nil {
-		q := u.Query()
-		expected = q.Get("wlanuserip")
-		if expected == "" {
-			expected = q.Get("wlan_user_ip")
-		}
-	}
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return true
-	} // Do not block authentication if Windows cannot report interfaces.
-	anyCampusIP := false
-	for _, iface := range interfaces {
-		addrs, err := iface.Addrs()
+	if portal == "" {
+		var err error
+		portal, err = c.portal.discover(ctx)
 		if err != nil {
-			continue
+			c.scheduleRetry("已连接校园网接口，但未发现认证跳转")
+			return err
 		}
-		for _, addr := range addrs {
-			ip, _, err := net.ParseCIDR(addr.String())
-			if err != nil || ip.To4() == nil {
-				continue
-			}
-			if expected != "" && ip.String() == expected {
-				return iface.Flags&net.FlagUp != 0
-			}
-			if iface.Flags&net.FlagUp != 0 && ip.To4()[0] == 10 {
-				anyCampusIP = true
-			}
-		}
+		c.lastPortal = portal
 	}
-	return anyCampusIP
-}
-
-func (k *keeper) discoverPortal() (string, error) {
-	for _, target := range []string{"http://9.9.9.9/", "http://neverssl.com/"} {
-		resp, err := k.client.Get(target)
-		if err != nil {
-			continue
-		}
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-			loc, err := resp.Location()
-			resp.Body.Close()
-			if err == nil {
-				return loc.String(), nil
-			}
-			continue
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		resp.Body.Close()
-		if m := regexp.MustCompile(`(?i)(?:location\.href|window\.location|url)\s*[=:]\s*['"](https?://[^'"<> ]+)`).FindSubmatch(body); m != nil {
-			return string(m[1]), nil
-		}
+	c.refreshLink()
+	if !c.link.ready() {
+		c.setState("link-down", "认证前有线接口断开："+c.link.describe())
+		return errors.New("有线接口未就绪")
 	}
-	return "", errors.New("无法从断网跳转发现认证入口；请提供登录页地址并写入 PORTAL_URL")
-}
-
-func (k *keeper) login(portal string) error {
-	u, err := url.Parse(portal)
-	if err != nil || u.Host == "" {
-		return errors.New("认证入口 URL 无效")
-	}
-	isEportal := strings.Contains(strings.ToLower(u.Path), "eportal")
-	isA79 := strings.EqualFold(u.Path, "/a79.htm")
-	if !isEportal && !isA79 {
-		return fmt.Errorf("发现的认证页面 %s 不是已知协议；需要根据实际页面补充适配", safePortal(portal))
-	}
-	q := u.Query()
-	ip := ""
-	for _, key := range []string{"wlan_user_ip", "wlanuserip", "userip", "user_ip", "ip"} {
-		if v := q.Get(key); net.ParseIP(v) != nil {
-			ip = v
-			break
-		}
-	}
-	if ip == "" {
-		conn, err := net.DialTimeout("udp4", net.JoinHostPort(u.Hostname(), "80"), 3*time.Second)
-		if err != nil {
-			return fmt.Errorf("获取本机有线 IP 失败：%w", err)
-		}
-		ip = strings.Split(conn.LocalAddr().String(), ":")[0]
-		conn.Close()
-	}
-	base := *u
-	if isA79 {
-		base.Host = net.JoinHostPort(u.Hostname(), "801")
-		base.Path = "/eportal/"
-	} else {
-		idx := strings.Index(strings.ToLower(u.Path), "/eportal")
-		if idx < 0 {
-			return errors.New("认证入口不包含 eportal 路径")
-		}
-		base.Path = u.Path[:idx] + "/eportal/"
-	}
-	base.RawQuery = ""
-	base.Fragment = ""
-	query := url.Values{
-		"c": {"Portal"}, "a": {"login"}, "login_method": {"1"},
-		"user_account": {k.cfg.account}, "user_password": {k.cfg.password},
-		"wlan_user_ip": {ip}, "wlan_user_mac": {"000000000000"},
-		"jsVersion": {"3.0"},
-	}
-	if isA79 {
-		account := k.cfg.account
-		if !k.cfg.suffixExplicit && !strings.Contains(account, "@") {
-			account += "@xyw"
-		}
-		query.Set("user_account", account)
-		if mac := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac")); len(mac) == 12 {
-			query.Set("wlan_user_mac", mac)
-		}
-		query.Set("wlan_ac_name", q.Get("wlanacname"))
-		query.Set("wlan_ac_ip", q.Get("wlanacip"))
-	}
-	ts := time.Now().UnixMilli()
-	query.Set("callback", fmt.Sprintf("dr%d", ts))
-	query.Set("_", fmt.Sprint(ts))
-	base.RawQuery = query.Encode()
-	resp, err := k.client.Get(base.String())
-	if err != nil {
-		return errors.New("认证请求失败（网络不可达或超时）")
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
-	if err != nil {
+	c.logger.Printf("尝试校园网认证：%s", safePortal(portal))
+	if err := c.portal.login(ctx, portal, c.link.ipv4); err != nil {
+		c.scheduleRetry("认证接口未确认成功：" + err.Error())
 		return err
 	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("认证接口 HTTP %d", resp.StatusCode)
-	}
-	start, end := strings.IndexByte(string(data), '{'), strings.LastIndexByte(string(data), '}')
-	if start < 0 || end < start {
-		return errors.New("认证接口未返回可识别的 JSON")
-	}
-	var result map[string]any
-	if err := json.Unmarshal(data[start:end+1], &result); err != nil {
-		return fmt.Errorf("认证响应解析失败：%w", err)
-	}
-	if fmt.Sprint(result["result"]) == "1" || fmt.Sprint(result["result"]) == "ok" {
-		log.Print("认证接口返回成功，正在核验 IPv4 外网")
-		return nil
-	}
-	if fmt.Sprint(result["ret_code"]) == "2" {
-		log.Print("认证接口称 IP 已在线，正在核验 IPv4 外网")
-		return nil
-	}
-	// Never print the raw response: some portals echo credentials or tokens.
-	return fmt.Errorf("认证接口未报告成功（result=%v，ret_code=%v）", result["result"], result["ret_code"])
-}
-
-func loadConfig(path string) (config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return config{}, fmt.Errorf("读取 %s 失败：%w", path, err)
-	}
-	vars := map[string]string{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	c.logger.Print("认证接口已响应，正在核验 IPv4 外网")
+	for i := 0; i < 5; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
 		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
+		if c.portal.probe(ctx).online {
+			c.setState("online", "登录后确认 IPv4 外网已恢复")
+			c.resetRetry()
+			return nil
 		}
-		vars[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
+		c.refreshLink()
+		if !c.link.ready() {
+			c.setState("link-down", "认证核验期间有线接口断开："+c.link.describe())
+			return errors.New("有线接口未就绪")
+		}
 	}
-	id, password := vars["STUDENT_ID"], vars["PASSWORD"]
-	if id == "" || password == "" {
-		return config{}, errors.New(".env 需要 STUDENT_ID 和 PASSWORD")
-	}
-	account := id
-	if !strings.Contains(account, "@") {
-		account += vars["ACCOUNT_SUFFIX"]
-	}
-	_, suffixExplicit := vars["ACCOUNT_SUFFIX"]
-	return config{account: account, password: password, portalURL: vars["PORTAL_URL"], suffixExplicit: suffixExplicit}, nil
+	c.scheduleRetry("认证后 15 秒仍无法访问 IPv4 外网")
+	return errors.New("认证未使外网恢复")
 }
 
-func mask(s string) string {
-	if len(s) <= 4 {
-		return "****"
+func (c *controller) setState(next, message string) {
+	if c.state != next {
+		c.logger.Printf("状态变化：%s → %s；%s", stateName(c.state), stateName(next), message)
 	}
-	return s[:2] + "****" + s[len(s)-2:]
+	c.state = next
 }
 
-func safePortal(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "<invalid>"
+func (c *controller) status() string {
+	s := stateName(c.state) + "；" + c.link.describe()
+	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
+		s += "；下次认证约 " + time.Until(c.nextRetry).Round(time.Second).String() + " 后"
 	}
-	return u.Scheme + "://" + u.Host + u.Path
+	return s
 }
 
-func jitter(d time.Duration) time.Duration {
-	return d + time.Duration(rand.Int63n(int64(d/5)+1))
+func stateName(s string) string {
+	switch s {
+	case "online":
+		return "外网正常"
+	case "offline":
+		return "外网中断"
+	case "link-down":
+		return "网线或接口未就绪"
+	default:
+		return "待检查"
+	}
+}
+
+func (c *controller) scheduleRetry(reason string) {
+	delay := min(c.backoff+time.Duration(rand.Int63n(int64(c.backoff/5)+1)), retryMax)
+	c.nextRetry = time.Now().Add(delay)
+	if !c.retryTimer.Stop() {
+		select {
+		case <-c.retryTimer.C:
+		default:
+		}
+	}
+	c.retryTimer.Reset(delay)
+	c.retryChannel = c.retryTimer.C
+	c.logger.Printf("%s；%s 后重试（指数退避上限 %s）", reason, delay.Round(time.Second), retryMax)
+	c.backoff = min(c.backoff*2, retryMax)
+}
+
+func (c *controller) resetRetry() {
+	c.backoff = retryBase
+	c.nextRetry = time.Time{}
+	c.retryChannel = nil
+	if !c.retryTimer.Stop() {
+		select {
+		case <-c.retryTimer.C:
+		default:
+		}
+	}
+}
+
+func (c *controller) resetAtSixIfDue() bool {
+	now := time.Now()
+	if now.Before(c.nextReset) {
+		return false
+	}
+	c.backoff = retryBase
+	c.nextReset = nextSix(now)
+	c.logger.Printf("已到每天 06:00：指数退避清零；下次清零时间 %s", c.nextReset.Format("2006-01-02 15:04"))
+	if !c.nextRetry.IsZero() {
+		c.nextRetry = time.Time{}
+		c.retryChannel = nil
+		c.retryTimer.Stop()
+	}
+	return true
+}
+
+func nextSix(now time.Time) time.Time {
+	china := time.FixedZone("Asia/Shanghai", 8*3600)
+	local := now.In(china)
+	next := time.Date(local.Year(), local.Month(), local.Day(), 6, 0, 0, 0, china)
+	if !next.After(local) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }

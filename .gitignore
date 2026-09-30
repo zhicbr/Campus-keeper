@@ -1,6 +1,7 @@
 .env
 *.log
 *.log.old
+keeper.log.*
 *.exe
 *.exe~
 .gocache/

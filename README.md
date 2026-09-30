@@ -1,36 +1,49 @@
 # 文昌校区校园网守护程序
 
-该程序持续检测 IPv4 外网，每轮都输出当前状态，通常约每 5 秒检查一次；连续两次检测失败后报告断网并尝试认证。认证失败时从 5 秒开始指数退避，最多 5 分钟；退避期间仍约每 5 秒检查并输出状态。网线或校园网 IPv4 接口不可用时约每 5 秒检查一次，不向认证服务器重复发送请求。已识别文昌有线网的 `a79.htm` 认证跳转，并使用同主机 `:801/eportal/` 接口；一次断网实测中已成功恢复外网。
+本程序用于 Windows 有线校园网。版本 `version1.0` 是首次跑通认证的基线；当前代码在此基础上重构了网络监视、认证重试、日志和开机运行。
 
-## 构建
+## 运行方式
+
+程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。文昌认证页默认的“校园用户”会使用 `@xyw` 后缀。若你选择其他运营商，可在 `.env` 中填写 `ACCOUNT_SUFFIX=@dx` 或 `ACCOUNT_SUFFIX=@lt`；若明确需要空后缀，填写 `ACCOUNT_SUFFIX=`。账号、密码不会写入日志。
+
+前台调试：
 
 ```powershell
 cd D:\dev\workspace\workspace-26-b\try-codex\wenchang-campus-keeper
-& 'D:\dev\envs\Go\bin\go.exe' build -buildvcs=false -o .\wenchang-campus-keeper.exe .
-```
-
-登录凭据从同目录 `.env` 读取，沿用 `STUDENT_ID` 和 `PASSWORD`。文昌有线认证页默认选择“校园用户”（账号后缀 `@xyw`），程序会在识别到 `a79.htm` 跳转时自动添加。若你手动登录时选择了其他运营商，请在 `.env` 添加相应的 `ACCOUNT_SUFFIX`，例如 `@dx`、`@lt`；若明确要空后缀，添加空的 `ACCOUNT_SUFFIX=`。如自动发现的认证入口不正确，可添加 `PORTAL_URL=http://认证服务器/a79.htm`。不要把 `.env`、日志分享出去。
-
-## 断网验证
-
-请在电脑本机操作，先启动程序：
-
-```powershell
 .\wenchang-campus-keeper.exe
 ```
 
-看到“外网连接正常”后，再手动退出校园网认证，**保持网线连接和程序窗口运行**。程序应检测掉线并尝试恢复；查看同目录 `keeper.log` 中的结果。若恢复失败，请先通过浏览器手动重新登录，再把日志中的错误信息发来。按 Ctrl+C 停止测试程序。
+按 **Ctrl+C** 停止。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 10 秒显示一次当前状态，每 20 秒检查一次 IPv4 外网。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。断网后才会向认证接口提交账号密码。
 
-`-once` 仅在已经断网、且本机可以操作终端时使用。若日志出现“不是已知协议”，需要根据实际认证页面补充适配。
+## 重试和恢复
 
-## 常驻运行
+- 认证失败时指数退避，从 5 秒增加到最多 5 分钟；退避期间仍检查外网和网卡，若网络自行恢复会立即清零。
+- 每天北京时间 **06:00** 清零退避。程序重启后也从基础退避开始。
+- 只在有线接口拥有校园网 IPv4 地址时尝试认证。若网线断开，等待接口恢复，不重复发送登录请求。
+- 当前认证页为 `10.2.5.251/a79.htm`，其配置对应 `:801/eportal/?c=Portal&a=login`。程序优先通过认证跳转获取 IP、MAC 和 BRAS 名称。若跳转发现失败，可在 `.env` 指定 `PORTAL_URL=http://10.2.5.251/a79.htm` 作为后备入口；此时可能缺少跳转中的 MAC 和 BRAS 参数。
+- 认证接口的返回值只表示请求被接受；程序以实际 IPv4 外网探测作为恢复成功的最终判据。
 
-验证通过后，管理员 PowerShell 中运行：
+## 开机常驻
+
+完成本机断网验证后，在**管理员 PowerShell** 运行：
 
 ```powershell
 .\install-task.ps1 -StartNow
 ```
 
-这会注册名为 `WenchangCampusKeeper` 的开机计划任务，以 SYSTEM 账户运行，无须用户登录。查看状态：`Get-ScheduledTask -TaskName WenchangCampusKeeper`；停止：`Stop-ScheduledTask -TaskName WenchangCampusKeeper`。电脑仍须保持通电、网线连接和网络适配器正常工作。
+这会创建 `WenchangCampusKeeper` 计划任务，以 SYSTEM 身份在开机时运行；程序异常退出时任务尝试重启，每天 06:05 还有一次补启动触发。后台使用 `-quiet`，仅记录状态变化和操作，减少日志量。即使用户未登录 Windows，任务仍可运行。
 
-原南湖脚本 `clogin.bat` 已按要求移入本工作区作为参考；它的 Wi-Fi 登录逻辑不用于文昌有线网。
+查看任务：`Get-ScheduledTask -TaskName WenchangCampusKeeper`。停止：`Stop-ScheduledTask -TaskName WenchangCampusKeeper`。计划任务与手动运行不可同时启动，程序用单实例锁防止重复登录。
+
+远程使用期间，电脑需保持通电且不进入睡眠；程序无法在关机、休眠或网线物理断开时维持远程连接。
+
+日志写在同目录 `keeper.log`，达到 5 MiB 后归档为带时间戳的文件，不自动永久删除。`.env`、日志、可执行文件和缓存均已加入 `.gitignore`。
+
+## 构建
+
+```powershell
+& 'D:\dev\envs\Go\bin\go.exe' test -buildvcs=false .
+& 'D:\dev\envs\Go\bin\go.exe' build -buildvcs=false -o .\wenchang-campus-keeper.exe .
+```
+
+Go 代码只依赖标准库。原南湖脚本 `clogin.bat` 留在工作区作为历史参考，不参与文昌登录。
