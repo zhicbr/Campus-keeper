@@ -1,0 +1,8 @@
+.env
+*.log
+*.log.old
+*.exe
+*.exe~
+.gocache/
+.gomodcache/
+portal-*
