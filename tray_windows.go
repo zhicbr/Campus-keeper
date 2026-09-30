@@ -5,8 +5,8 @@ package main
 import (
 	"errors"
 	"io"
-	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -15,8 +15,10 @@ import (
 const (
 	trayMessage       = 0x8001
 	statusMessage     = 0x8002
+	logMessage        = 0x8003
 	wmClose           = 0x0010
 	wmDestroy         = 0x0002
+	wmSize            = 0x0005
 	wmRButtonUp       = 0x0205
 	wmLButtonDblClk   = 0x0203
 	nimAdd            = 0
@@ -40,6 +42,8 @@ var (
 	destroyWindow       = user32.NewProc("DestroyWindow")
 	loadIcon            = user32.NewProc("LoadIconW")
 	showWindow          = user32.NewProc("ShowWindow")
+	moveWindow          = user32.NewProc("MoveWindow")
+	setWindowText       = user32.NewProc("SetWindowTextW")
 	createPopupMenu     = user32.NewProc("CreatePopupMenu")
 	appendMenu          = user32.NewProc("AppendMenuW")
 	trackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -48,11 +52,6 @@ var (
 	setForegroundWindow = user32.NewProc("SetForegroundWindow")
 	shellNotifyIcon     = shell32.NewProc("Shell_NotifyIconW")
 	getModuleHandle     = kernel32.NewProc("GetModuleHandleW")
-	allocConsole        = kernel32.NewProc("AllocConsole")
-	getConsoleWindow    = kernel32.NewProc("GetConsoleWindow")
-	getStdHandle        = kernel32.NewProc("GetStdHandle")
-	setConsoleOutputCP  = kernel32.NewProc("SetConsoleOutputCP")
-	setConsoleTitle     = kernel32.NewProc("SetConsoleTitleW")
 )
 
 type winPoint struct{ x, y int32 }
@@ -101,9 +100,11 @@ type notifyIconData struct {
 type trayUI struct {
 	mu             sync.Mutex
 	hwnd           uintptr
+	logWindow      uintptr
+	logEdit        uintptr
+	logText        string
 	status         string
 	consoleVisible bool
-	consoleFile    *os.File
 	quit           func()
 	done           chan struct{}
 }
@@ -137,12 +138,32 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		case statusMessage:
 			t.updateIcon(nimModify)
 			return 0
+		case logMessage:
+			t.updateLogs()
+			return 0
+		case wmSize:
+			if hwnd == t.logWindow && t.logEdit != 0 {
+				moveWindow.Call(t.logEdit, 0, 0, uintptr(uint16(lparam)), uintptr(uint16(lparam>>16)), 1)
+			}
+			return 0
 		case wmClose:
+			if hwnd == t.logWindow {
+				showWindow.Call(hwnd, 0)
+				t.mu.Lock()
+				t.consoleVisible = false
+				t.mu.Unlock()
+				return 0
+			}
+			if t.logWindow != 0 {
+				destroyWindow.Call(t.logWindow)
+			}
 			destroyWindow.Call(hwnd)
 			return 0
 		case wmDestroy:
-			t.updateIcon(nimDelete)
-			postQuitMessage.Call(0)
+			if hwnd == t.hwnd {
+				t.updateIcon(nimDelete)
+				postQuitMessage.Call(0)
+			}
 			return 0
 		}
 		result, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
@@ -166,6 +187,25 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		destroyWindow.Call(hwnd)
 		return
 	}
+	logTitle := syscall.StringToUTF16Ptr("文昌校园网守护程序 - 运行日志")
+	logWindow, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(logTitle)), 0x00CF0000, 100, 100, 820, 480, 0, 0, instance, 0)
+	if logWindow == 0 {
+		ready <- errors.New("无法创建日志窗口")
+		destroyWindow.Call(hwnd)
+		return
+	}
+	t.logWindow = logWindow
+	editClass := syscall.StringToUTF16Ptr("EDIT")
+	// Read-only multiline text control, with a vertical scrollbar.
+	edit, _, _ := createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, 0x50200844, 0, 0, 800, 440, logWindow, 0, instance, 0)
+	if edit == 0 {
+		ready <- errors.New("无法创建日志文本框")
+		destroyWindow.Call(logWindow)
+		destroyWindow.Call(hwnd)
+		return
+	}
+	t.logEdit = edit
+	setConsoleWriter(t)
 	if initialConsole {
 		t.toggleConsole()
 	}
@@ -221,9 +261,9 @@ func (t *trayUI) popupMenu() {
 	visible := t.consoleVisible
 	hwnd := t.hwnd
 	t.mu.Unlock()
-	label := "显示终端"
+	label := "显示日志窗口"
 	if visible {
-		label = "隐藏终端"
+		label = "隐藏日志窗口"
 	}
 	appendMenu.Call(menu, 0, 1, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(label))))
 	appendMenu.Call(menu, 0, 2, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出程序"))))
@@ -241,35 +281,48 @@ func (t *trayUI) popupMenu() {
 
 func (t *trayUI) toggleConsole() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.consoleVisible {
-		if hwnd, _, _ := getConsoleWindow.Call(); hwnd != 0 {
-			showWindow.Call(hwnd, 0)
-		}
-		setConsoleWriter(io.Discard)
 		t.consoleVisible = false
+		t.mu.Unlock()
+		showWindow.Call(t.logWindow, 0)
 		return
 	}
-	hwnd, _, _ := getConsoleWindow.Call()
-	if hwnd == 0 {
-		if result, _, _ := allocConsole.Call(); result == 0 {
-			return
-		}
-		hwnd, _, _ = getConsoleWindow.Call()
-		setConsoleOutputCP.Call(65001)
-		setConsoleTitle.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("文昌校园网守护程序"))))
-		handle, _, _ := getStdHandle.Call(^uintptr(10)) // STD_OUTPUT_HANDLE = -11
-		t.consoleFile = os.NewFile(handle, "CONOUT$")
-	}
-	showWindow.Call(hwnd, 5)
-	if t.consoleFile != nil {
-		setConsoleWriter(t.consoleFile)
-	}
 	t.consoleVisible = true
-	writeConsole([]byte("文昌校园网守护程序：终端已显示；双击托盘图标可隐藏。\r\n"))
+	t.mu.Unlock()
+	t.updateLogs()
+	showWindow.Call(t.logWindow, 5)
+	setForegroundWindow.Call(t.logWindow)
+}
+
+func (t *trayUI) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	t.logText += string(p)
+	if len(t.logText) > 48<<10 {
+		t.logText = t.logText[len(t.logText)-(40<<10):]
+		if i := strings.IndexByte(t.logText, '\n'); i >= 0 {
+			t.logText = t.logText[i+1:]
+		}
+	}
+	visible, hwnd := t.consoleVisible, t.hwnd
+	t.mu.Unlock()
+	if visible && hwnd != 0 {
+		postMessage.Call(hwnd, logMessage, 0, 0)
+	}
+	return len(p), nil
+}
+
+func (t *trayUI) updateLogs() {
+	t.mu.Lock()
+	content := t.logText
+	edit := t.logEdit
+	t.mu.Unlock()
+	if edit != 0 {
+		setWindowText.Call(edit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(strings.ReplaceAll(content, "\n", "\r\n")))))
+	}
 }
 
 func (t *trayUI) close() {
+	setConsoleWriter(io.Discard)
 	t.mu.Lock()
 	hwnd := t.hwnd
 	t.mu.Unlock()
