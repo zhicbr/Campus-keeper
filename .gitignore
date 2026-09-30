@@ -6,4 +6,6 @@ keeper.log.*
 *.exe~
 .gocache/
 .gomodcache/
+.go-cache/
+.go-mod-cache/
 portal-*

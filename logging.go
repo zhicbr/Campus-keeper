@@ -34,7 +34,7 @@ func newRotatingLog(path string, max int64) (*rotatingLog, error) {
 func (w *rotatingLog) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, _ = os.Stdout.Write(p)
+	writeConsole(p)
 	if w.size+int64(len(p)) > w.max {
 		if err := w.rotate(); err != nil {
 			return 0, err
@@ -77,3 +77,20 @@ func (w *rotatingLog) Close() error {
 }
 
 var _ io.WriteCloser = (*rotatingLog)(nil)
+
+var consoleSink = struct {
+	sync.RWMutex
+	writer io.Writer
+}{writer: io.Discard}
+
+func writeConsole(p []byte) {
+	consoleSink.RLock()
+	_, _ = consoleSink.writer.Write(p)
+	consoleSink.RUnlock()
+}
+
+func setConsoleWriter(w io.Writer) {
+	consoleSink.Lock()
+	consoleSink.writer = w
+	consoleSink.Unlock()
+}

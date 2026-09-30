@@ -26,6 +26,7 @@ type controller struct {
 	cfg          config
 	portal       *portalClient
 	logger       *log.Logger
+	ui           *trayUI
 	quiet        bool
 	state        string
 	lastPortal   string
@@ -40,6 +41,7 @@ type controller struct {
 func main() {
 	quiet := flag.Bool("quiet", false, "only log changes and actions (for scheduled task)")
 	once := flag.Bool("once", false, "one check and one login attempt")
+	console := flag.Bool("console", false, "show terminal at startup")
 	flag.Parse()
 	exe, err := os.Executable()
 	if err != nil {
@@ -59,11 +61,18 @@ func main() {
 	if err := acquireSingleInstance(); err != nil {
 		logger.Fatal(err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(baseCtx)
+	defer cancel()
+	ui, err := startTray(cancel, *console)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	defer ui.close()
 	c := &controller{
 		cfg: cfg, portal: newPortalClient(cfg), logger: logger,
-		quiet: *quiet, backoff: retryBase, retryTimer: time.NewTimer(time.Hour),
+		ui: ui, quiet: *quiet, backoff: retryBase, retryTimer: time.NewTimer(time.Hour),
 	}
 	if !c.retryTimer.Stop() {
 		select {
@@ -244,6 +253,9 @@ func (c *controller) setState(next, message string) {
 		c.logger.Printf("状态变化：%s → %s；%s", stateName(c.state), stateName(next), message)
 	}
 	c.state = next
+	if c.ui != nil {
+		c.ui.setStatus(stateName(next))
+	}
 }
 
 func (c *controller) status() string {

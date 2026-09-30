@@ -6,14 +6,14 @@
 
 程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。文昌认证页默认的“校园用户”会使用 `@xyw` 后缀。若你选择其他运营商，可在 `.env` 中填写 `ACCOUNT_SUFFIX=@dx` 或 `ACCOUNT_SUFFIX=@lt`；若明确需要空后缀，填写 `ACCOUNT_SUFFIX=`。账号、密码不会写入日志。
 
-前台调试：
+默认在系统托盘运行，不显示终端：
 
 ```powershell
 cd D:\dev\workspace\workspace-26-b\try-codex\wenchang-campus-keeper
-.\wenchang-campus-keeper.exe
+Start-Process .\wenchang-campus-keeper.exe
 ```
 
-按 **Ctrl+C** 停止。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 10 秒显示一次当前状态，每 20 秒检查一次 IPv4 外网。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。断网后才会向认证接口提交账号密码。
+双击托盘图标可显示或隐藏终端；右键菜单也可切换终端或退出程序。图标提示文字显示当前网络状态。启动时直接显示终端可运行 `Start-Process .\wenchang-campus-keeper.exe -ArgumentList '-console'`。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 10 秒显示一次当前状态，每 20 秒检查一次 IPv4 外网。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。断网后才会向认证接口提交账号密码。
 
 ## 重试和恢复
 
@@ -25,13 +25,13 @@ cd D:\dev\workspace\workspace-26-b\try-codex\wenchang-campus-keeper
 
 ## 开机常驻
 
-完成本机断网验证后，在**管理员 PowerShell** 运行：
+完成本机断网验证后，在当前用户的 PowerShell 运行：
 
 ```powershell
 .\install-task.ps1 -StartNow
 ```
 
-这会创建 `WenchangCampusKeeper` 计划任务，以 SYSTEM 身份在开机时运行；程序异常退出时任务尝试重启，每天 06:05 还有一次补启动触发。后台使用 `-quiet`，仅记录状态变化和操作，减少日志量。即使用户未登录 Windows，任务仍可运行。
+这会创建 `WenchangCampusKeeper` 计划任务，在当前用户登录 Windows 后运行并显示托盘图标；程序异常退出时任务尝试重启，每天 06:05 还有一次补启动触发。后台使用 `-quiet`，仅记录状态变化和操作，减少日志量。托盘图标需要该用户保持登录。
 
 查看任务：`Get-ScheduledTask -TaskName WenchangCampusKeeper`。停止：`Stop-ScheduledTask -TaskName WenchangCampusKeeper`。计划任务与手动运行不可同时启动，程序用单实例锁防止重复登录。
 
@@ -43,7 +43,7 @@ cd D:\dev\workspace\workspace-26-b\try-codex\wenchang-campus-keeper
 
 ```powershell
 & 'D:\dev\envs\Go\bin\go.exe' test -buildvcs=false .
-& 'D:\dev\envs\Go\bin\go.exe' build -buildvcs=false -o .\wenchang-campus-keeper.exe .
+& 'D:\dev\envs\Go\bin\go.exe' build -buildvcs=false -ldflags='-H=windowsgui' -o .\wenchang-campus-keeper.exe .
 ```
 
 Go 代码只依赖标准库。原南湖脚本 `clogin.bat` 留在工作区作为历史参考，不参与文昌登录。
