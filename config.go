@@ -11,6 +11,8 @@ type config struct {
 	account        string
 	password       string
 	portalURL      string
+	campusMode     campus
+	accountSuffix  string
 	suffixExplicit bool
 }
 
@@ -36,10 +38,35 @@ func loadConfig(path string) (config, error) {
 		return config{}, errors.New(".env 必须包含 STUDENT_ID 和 PASSWORD")
 	}
 	_, explicit := vars["ACCOUNT_SUFFIX"]
-	if !strings.Contains(id, "@") {
-		id += vars["ACCOUNT_SUFFIX"]
+	suffix := vars["ACCOUNT_SUFFIX"]
+	if suffix != "" && !strings.HasPrefix(suffix, "@") {
+		return config{}, errors.New("ACCOUNT_SUFFIX 必须以 @ 开头，或留空")
 	}
-	return config{account: id, password: password, portalURL: vars["PORTAL_URL"], suffixExplicit: explicit}, nil
+	mode := campus(strings.ToLower(vars["CAMPUS"]))
+	if mode == "" {
+		mode = campusAuto
+	}
+	if mode != campusAuto && mode != campusWenchang && mode != campusNanhu {
+		return config{}, errors.New("CAMPUS 只能为 auto、wenchang 或 nanhu")
+	}
+	return config{account: id, password: password, portalURL: vars["PORTAL_URL"], campusMode: mode, accountSuffix: suffix, suffixExplicit: explicit}, nil
+}
+
+func (c config) accountFor(site campus) string {
+	if strings.Contains(c.account, "@") {
+		return c.account
+	}
+	if c.suffixExplicit {
+		return c.account + c.accountSuffix
+	}
+	switch site {
+	case campusWenchang:
+		return c.account + "@xyw"
+	case campusNanhu:
+		return c.account + "@cmcc"
+	default:
+		return c.account
+	}
 }
 
 func mask(s string) string {

@@ -29,6 +29,7 @@ type controller struct {
 	ui           *trayUI
 	quiet        bool
 	state        string
+	campus       campus
 	lastPortal   string
 	link         linkState
 	backoff      time.Duration
@@ -81,7 +82,7 @@ func main() {
 		}
 	}
 	c.nextReset = nextSix(time.Now())
-	logger.Printf("校园网守护程序启动；账号 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), healthInterval, linkInterval)
+	logger.Printf("校园网守护程序启动；账号 %s；校区模式 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), cfg.campusMode, healthInterval, linkInterval)
 	if *once {
 		if err := c.cycle(ctx, "手动单次检测"); err != nil {
 			logger.Printf("本次检查未恢复：%v", err)
@@ -123,8 +124,8 @@ func (c *controller) run(ctx context.Context) error {
 			return ctx.Err()
 		case link := <-linkChanges:
 			if link != c.link {
-				c.link = link
-				_ = c.cycle(ctx, "有线接口变化")
+				c.adoptLink(link)
+				_ = c.cycle(ctx, "网络接口变化")
 			}
 		case <-healthTicker.C:
 			c.resetAtSixIfDue()
@@ -154,9 +155,10 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.resetAtSixIfDue()
 	c.refreshLink()
 	if !c.link.ready() {
-		c.setState("link-down", fmt.Sprintf("有线接口未就绪（%s）；等待网线、网卡或 DHCP 恢复", c.link.describe()))
-		return errors.New("有线接口未就绪")
+		c.setState("link-down", fmt.Sprintf("校园网接口未就绪（%s）；等待网线、Wi-Fi 或 DHCP 恢复", c.link.describe()))
+		return errors.New("校园网接口未就绪")
 	}
+	probeLink := c.link
 	if !c.quiet {
 		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
 	}
@@ -192,9 +194,12 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		result = second
 	}
 	c.refreshLink()
+	if !c.link.sameNetwork(probeLink) {
+		return errors.New("外网检测期间网络已切换，等待重新识别校区")
+	}
 	if !c.link.ready() {
-		c.setState("link-down", "有线接口未就绪："+c.link.describe())
-		return errors.New("有线接口未就绪")
+		c.setState("link-down", "校园网接口未就绪："+c.link.describe())
+		return errors.New("校园网接口未就绪")
 	}
 	c.setState("offline", "IPv4 外网中断："+result.reason)
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
@@ -205,24 +210,49 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	portal := c.lastPortal
 	if portal == "" {
-		portal = c.cfg.portalURL
-	}
-	if portal == "" {
-		var err error
-		portal, err = c.portal.discover(ctx)
-		if err != nil {
-			c.scheduleRetry("已连接校园网接口，但未发现认证跳转")
-			return err
+		found, discoverErr := c.portal.discover(ctx)
+		if discoverErr == nil {
+			portal = found
+		} else {
+			portal = c.cfg.portalURL
+			if portal == "" && c.cfg.campusMode == campusWenchang {
+				portal = "http://10.2.5.251/a79.htm"
+			}
+			if portal == "" && c.cfg.campusMode == campusNanhu {
+				portal = "http://10.2.5.251:801/eportal/"
+			}
 		}
+	}
+	site, err := chooseCampus(c.cfg.campusMode, portal, c.link, c.campus)
+	if err != nil {
+		c.scheduleRetry("不能选择认证流程：" + err.Error())
+		return err
+	}
+	if c.campus != site {
+		c.logger.Printf("已选择%s校区认证流程", campusName(site))
+		c.campus = site
+	}
+	if kind, _ := classifyPortal(portal); kind == portalWenchang && site == campusNanhu {
+		c.logger.Print("提示：CAMPUS=nanhu 已覆盖 /a79.htm 的文昌自动推断；请现场核对校区")
+	}
+	if _, portalErr := classifyPortal(portal); portalErr != nil {
+		c.logger.Printf("忽略未知认证跳转 %s；仅使用已知校园网服务器", safePortal(portal))
+		portal = ""
+	}
+	if portal != "" {
 		c.lastPortal = portal
 	}
+	chosenLink := c.link
 	c.refreshLink()
-	if !c.link.ready() {
-		c.setState("link-down", "认证前有线接口断开："+c.link.describe())
-		return errors.New("有线接口未就绪")
+	if !c.link.sameNetwork(chosenLink) {
+		return errors.New("认证前网络已切换，等待重新识别校区")
 	}
-	c.logger.Printf("尝试校园网认证：%s", safePortal(portal))
-	if err := c.portal.login(ctx, portal, c.link.ipv4); err != nil {
+	if !c.link.ready() {
+		c.setState("link-down", "认证前校园网接口断开："+c.link.describe())
+		return errors.New("校园网接口未就绪")
+	}
+	c.logger.Printf("尝试%s校园网认证：%s", campusName(site), safePortal(portal))
+	if err := c.portal.login(ctx, site, portal, c.link.ipv4); err != nil {
 		c.scheduleRetry("认证接口未确认成功：" + err.Error())
 		return err
 	}
@@ -239,9 +269,12 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 			return nil
 		}
 		c.refreshLink()
+		if !c.link.sameNetwork(chosenLink) {
+			return errors.New("认证核验期间网络已切换")
+		}
 		if !c.link.ready() {
-			c.setState("link-down", "认证核验期间有线接口断开："+c.link.describe())
-			return errors.New("有线接口未就绪")
+			c.setState("link-down", "认证核验期间校园网接口断开："+c.link.describe())
+			return errors.New("校园网接口未就绪")
 		}
 	}
 	c.scheduleRetry("认证后 15 秒仍无法访问 IPv4 外网")
@@ -259,7 +292,11 @@ func (c *controller) setState(next, message string) {
 }
 
 func (c *controller) status() string {
-	s := stateName(c.state) + "；" + c.link.describe()
+	site := c.campus
+	if site == "" && c.cfg.campusMode != campusAuto {
+		site = c.cfg.campusMode
+	}
+	s := campusName(site) + "；" + stateName(c.state) + "；" + c.link.describe()
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		s += "；下次认证约 " + time.Until(c.nextRetry).Round(time.Second).String() + " 后"
 	}
@@ -273,7 +310,7 @@ func stateName(s string) string {
 	case "offline":
 		return "外网中断"
 	case "link-down":
-		return "网线或接口未就绪"
+		return "校园网接口未就绪"
 	default:
 		return "待检查"
 	}

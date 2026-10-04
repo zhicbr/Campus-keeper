@@ -1,10 +1,12 @@
-# 文昌校区校园网守护程序
+# 南湖／文昌校园网守护程序
 
-本程序用于 Windows 有线校园网。版本 `version1.0` 是首次跑通认证的基线；当前代码在此基础上重构了网络监视、认证重试、日志和开机运行。
+本程序用于 Windows 校园网有线和 Wi-Fi 连接。`version1.0` 标签保留首次跑通文昌认证的基线。可执行文件仍叫 `wenchang-campus-keeper.exe`，以兼容现有启动方式和计划任务。
 
 ## 运行方式
 
-程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。文昌认证页默认的“校园用户”会使用 `@xyw` 后缀。若你选择其他运营商，可在 `.env` 中填写 `ACCOUNT_SUFFIX=@dx` 或 `ACCOUNT_SUFFIX=@lt`；若明确需要空后缀，填写 `ACCOUNT_SUFFIX=`。账号、密码不会写入日志。
+程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。默认 `CAMPUS=auto`：文昌 `/a79.htm` 跳转选文昌；已知 eportal 跳转加 `CUMT_Stu` Wi-Fi 选南湖。两校区共用认证服务器，所以单看服务器 IP 不能区分。若自动识别失败，在 `.env` 增加 `CAMPUS=nanhu` 或 `CAMPUS=wenchang` 后重新启动；显式设置优先于自动推断，切换校区时应相应修改或恢复 `auto`。
+
+文昌默认账号后缀为 `@xyw`，南湖沿用旧脚本的 `@cmcc`。若使用其他运营商，在 `.env` 填 `ACCOUNT_SUFFIX=@dx`、`ACCOUNT_SUFFIX=@lt` 等；明确需要空后缀则填 `ACCOUNT_SUFFIX=`。若 `STUDENT_ID` 已含 `@`，直接使用该完整账号。账号和密码不写入日志。
 
 默认在系统托盘运行，不显示终端：
 
@@ -19,8 +21,9 @@ Start-Process .\wenchang-campus-keeper.exe
 
 - 认证失败时指数退避，从 5 秒增加到最多 5 分钟；退避期间仍检查外网和网卡，若网络自行恢复会立即清零。
 - 每天北京时间 **06:00** 清零退避。程序重启后也从基础退避开始。
-- 只在有线接口拥有校园网 IPv4 地址时尝试认证。若网线断开，等待接口恢复，不重复发送登录请求。
+- 只在校园网物理网卡拥有 IPv4 地址时尝试认证。若网线或 Wi-Fi 断开，等待接口恢复，不重复发送登录请求。南湖 Wi-Fi 需要先在 Windows 保存 `CUMT_Stu` 配置并启用自动连接；程序负责校园网网页认证。
 - 当前认证页为 `10.2.5.251/a79.htm`，其配置对应 `:801/eportal/?c=Portal&a=login`。程序优先通过认证跳转获取 IP、MAC 和 BRAS 名称。若跳转发现失败，可在 `.env` 指定 `PORTAL_URL=http://10.2.5.251/a79.htm` 作为后备入口；此时可能缺少跳转中的 MAC 和 BRAS 参数。
+- 南湖流程按原 `clogin.bat` 构造 eportal 请求，使用本机 IPv4 和脚本原有的全零 MAC 参数。两校区的认证请求只发送到已知服务器 `10.2.5.251:801`；未知跳转不会接收账号密码。
 - 认证接口的返回值只表示请求被接受；程序以实际 IPv4 外网探测作为恢复成功的最终判据。
 
 ## 开机常驻
@@ -46,4 +49,4 @@ Start-Process .\wenchang-campus-keeper.exe
 & 'D:\dev\envs\Go\bin\go.exe' build -buildvcs=false -ldflags='-H=windowsgui' -o .\wenchang-campus-keeper.exe .
 ```
 
-Go 代码只依赖标准库。原南湖脚本 `clogin.bat` 留在工作区作为历史参考，不参与文昌登录。
+Go 代码只依赖标准库。南湖请求根据原 `clogin.bat` 实现；该脚本不再参与运行。明天到南湖后需由用户现场验证实际认证跳转及登录结果，详见 [DESIGN.md](DESIGN.md)。

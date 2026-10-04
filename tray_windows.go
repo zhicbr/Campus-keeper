@@ -187,7 +187,7 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		destroyWindow.Call(hwnd)
 		return
 	}
-	logTitle := syscall.StringToUTF16Ptr("文昌校园网守护程序 - 运行日志")
+	logTitle := syscall.StringToUTF16Ptr("校园网守护程序 - 运行日志")
 	logWindow, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(logTitle)), 0x00CF0000, 100, 100, 820, 480, 0, 0, instance, 0)
 	if logWindow == 0 {
 		ready <- errors.New("无法创建日志窗口")
@@ -241,7 +241,7 @@ func (t *trayUI) updateIcon(action uintptr) bool {
 		iconID = 32516 // information
 	case "外网中断":
 		iconID = 32515 // warning
-	case "网线或接口未就绪":
+	case "校园网接口未就绪":
 		iconID = 32513 // error
 	}
 	icon, _, _ := loadIcon.Call(0, iconID)

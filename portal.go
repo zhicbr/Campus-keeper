@@ -108,25 +108,21 @@ func (p *portalClient) discover(ctx context.Context) (string, error) {
 	return "", errors.New("未收到校园网认证跳转")
 }
 
-func (p *portalClient) login(ctx context.Context, portal, currentIP string) error {
-	u, err := url.Parse(portal)
-	if err != nil || u.Host == "" || u.Scheme != "http" {
-		return errors.New("认证入口 URL 无效")
+func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP string) error {
+	if site != campusWenchang && site != campusNanhu {
+		return errors.New("校区未识别，不能发送账号密码")
 	}
-	isA79 := strings.EqualFold(u.Path, "/a79.htm")
-	isEportal := strings.Contains(strings.ToLower(u.Path), "/eportal")
-	if !isA79 && !isEportal {
-		return fmt.Errorf("未知的认证页 %s", safePortal(portal))
+	if _, err := classifyPortal(portal); err != nil {
+		return err
 	}
-	base := *u
-	if isA79 {
-		base.Host = net.JoinHostPort(u.Hostname(), "801")
-		base.Path = "/eportal/"
-	} else {
-		base.Path = u.Path[:strings.Index(strings.ToLower(u.Path), "/eportal")] + "/eportal/"
+	// The older Nanhu script and verified Wenchang flow both use this backend.
+	// Never derive a credential-bearing destination from an arbitrary redirect.
+	base, _ := url.Parse("http://10.2.5.251:801/eportal/")
+	q := url.Values{}
+	if portal != "" {
+		u, _ := url.Parse(portal)
+		q = u.Query()
 	}
-	base.RawQuery, base.Fragment = "", ""
-	q := u.Query()
 	ip := currentIP
 	if ip == "" {
 		for _, key := range []string{"wlanuserip", "wlan_user_ip", "userip"} {
@@ -136,23 +132,23 @@ func (p *portalClient) login(ctx context.Context, portal, currentIP string) erro
 			}
 		}
 	}
-	if net.ParseIP(ip) == nil {
+	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
 		return errors.New("没有可用的校园网 IPv4 地址")
 	}
-	account := p.cfg.account
-	if isA79 && !p.cfg.suffixExplicit && !strings.Contains(account, "@") {
-		account += "@xyw"
-	}
-	mac := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac"))
-	if len(mac) != 12 {
-		mac = "000000000000"
-	}
+	account := p.cfg.accountFor(site)
 	params := url.Values{
 		"c": {"Portal"}, "a": {"login"}, "login_method": {"1"},
 		"user_account": {account}, "user_password": {p.cfg.password},
-		"wlan_user_ip": {ip}, "wlan_user_mac": {mac},
-		"wlan_ac_name": {q.Get("wlanacname")}, "wlan_ac_ip": {q.Get("wlanacip")},
+		"wlan_user_ip": {ip}, "wlan_user_mac": {"000000000000"},
 		"jsVersion": {"3.0"},
+	}
+	if site == campusWenchang {
+		mac := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac"))
+		if len(mac) == 12 {
+			params.Set("wlan_user_mac", mac)
+		}
+		params.Set("wlan_ac_name", q.Get("wlanacname"))
+		params.Set("wlan_ac_ip", q.Get("wlanacip"))
 	}
 	stamp := time.Now().UnixMilli()
 	params.Set("callback", fmt.Sprintf("dr%d", stamp))
