@@ -21,6 +21,10 @@ const (
 	wmSize            = 0x0005
 	wmRButtonUp       = 0x0205
 	wmLButtonDblClk   = 0x0203
+	emSetSel          = 0x00B1
+	emLineScroll      = 0x00B6
+	emScrollCaret     = 0x00B7
+	emGetFirstLine    = 0x00CE
 	nimAdd            = 0
 	nimModify         = 1
 	nimDelete         = 2
@@ -44,6 +48,8 @@ var (
 	showWindow          = user32.NewProc("ShowWindow")
 	moveWindow          = user32.NewProc("MoveWindow")
 	setWindowText       = user32.NewProc("SetWindowTextW")
+	sendMessage         = user32.NewProc("SendMessageW")
+	getScrollInfo       = user32.NewProc("GetScrollInfo")
 	createPopupMenu     = user32.NewProc("CreatePopupMenu")
 	appendMenu          = user32.NewProc("AppendMenuW")
 	trackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -55,6 +61,16 @@ var (
 )
 
 type winPoint struct{ x, y int32 }
+type scrollInfo struct {
+	size     uint32
+	mask     uint32
+	minimum  int32
+	maximum  int32
+	page     uint32
+	position int32
+	track    int32
+}
+
 type winMessage struct {
 	hwnd     uintptr
 	message  uint32
@@ -289,8 +305,8 @@ func (t *trayUI) toggleConsole() {
 	}
 	t.consoleVisible = true
 	t.mu.Unlock()
-	t.updateLogs()
 	showWindow.Call(t.logWindow, 5)
+	t.updateLogs()
 	setForegroundWindow.Call(t.logWindow)
 }
 
@@ -317,8 +333,31 @@ func (t *trayUI) updateLogs() {
 	edit := t.logEdit
 	t.mu.Unlock()
 	if edit != 0 {
-		setWindowText.Call(edit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(strings.ReplaceAll(content, "\n", "\r\n")))))
+		followTail := logAtBottom(edit)
+		firstLine, _, _ := sendMessage.Call(edit, emGetFirstLine, 0, 0)
+		text := syscall.StringToUTF16(strings.ReplaceAll(content, "\n", "\r\n"))
+		setWindowText.Call(edit, uintptr(unsafe.Pointer(&text[0])))
+		if followTail {
+			end := uintptr(len(text) - 1)
+			sendMessage.Call(edit, emSetSel, end, end)
+			sendMessage.Call(edit, emScrollCaret, 0, 0)
+		} else {
+			currentLine, _, _ := sendMessage.Call(edit, emGetFirstLine, 0, 0)
+			if firstLine > currentLine {
+				sendMessage.Call(edit, emLineScroll, 0, firstLine-currentLine)
+			}
+		}
 	}
+}
+
+func logAtBottom(edit uintptr) bool {
+	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 0x7} // range, page, position
+	ok, _, _ := getScrollInfo.Call(edit, 1, uintptr(unsafe.Pointer(&info)))  // SB_VERT
+	if ok == 0 || info.page == 0 {
+		return true
+	}
+	lastPage := int64(info.maximum) - int64(info.page) + 1
+	return int64(info.position) >= lastPage-1
 }
 
 func (t *trayUI) close() {
