@@ -59,14 +59,12 @@ func (c config) accountFor(site campus) string {
 	if c.suffixExplicit {
 		return c.account + c.accountSuffix
 	}
-	switch site {
-	case campusWenchang:
+	// The account realm is an operator choice, not a campus identifier. The
+	// user's @xyw account has now authenticated on both campuses.
+	if site == campusWenchang || site == campusNanhu {
 		return c.account + "@xyw"
-	case campusNanhu:
-		return c.account + "@cmcc"
-	default:
-		return c.account
 	}
+	return c.account
 }
 
 func mask(s string) string {

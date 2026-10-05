@@ -50,10 +50,11 @@ func (c *controller) adoptLink(next linkState) bool {
 		return false
 	}
 	if !next.sameNetwork(c.link) {
+		hadContext := c.campus != "" || c.lastPortal != "" || !c.nextRetry.IsZero()
 		c.lastPortal = ""
 		c.campus = ""
 		c.resetRetry()
-		if c.logger != nil && c.link.index != 0 {
+		if hadContext && c.logger != nil {
 			c.logger.Print("网络已切换；清除校区、认证入口及重试缓存")
 		}
 	}
@@ -66,11 +67,35 @@ func (c *controller) adoptLink(next linkState) bool {
 func monitorLink(ctx context.Context, logger *log.Logger, notifications <-chan struct{}, changes chan linkState) {
 	ticker := time.NewTicker(linkInterval)
 	defer ticker.Stop()
+	settleTimer := time.NewTimer(time.Hour)
+	stopTimer(settleTimer)
+	defer settleTimer.Stop()
 	previous := linkState{}
 	initialized := false
+	var pendingUntil time.Time
 	check := func() {
 		next := readLink(previous)
+		// Interface enumeration and DHCP can briefly disappear during WLAN
+		// roaming. Wait two seconds before reporting a loss or reconnecting.
+		if initialized && previous.ready() && !next.ready() {
+			if pendingUntil.IsZero() {
+				pendingUntil = time.Now().Add(2 * time.Second)
+				settleTimer.Reset(2 * time.Second)
+				return
+			}
+			if time.Now().Before(pendingUntil) {
+				return
+			}
+		}
+		if !pendingUntil.IsZero() {
+			pendingUntil = time.Time{}
+			stopTimer(settleTimer)
+		}
 		if initialized && next == previous {
+			return
+		}
+		if initialized && !next.ready() && !previous.ready() && next.describe() == previous.describe() {
+			previous = next
 			return
 		}
 		if !initialized {
@@ -98,6 +123,8 @@ func monitorLink(ctx context.Context, logger *log.Logger, notifications <-chan s
 		case <-ctx.Done():
 			return
 		case <-notifications:
+			check()
+		case <-settleTimer.C:
 			check()
 		case <-ticker.C:
 			check()

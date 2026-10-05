@@ -22,7 +22,7 @@ func TestCampusSelectionDoesNotGuessFromSharedHost(t *testing.T) {
 		want   campus
 		fail   bool
 	}{
-		{"wenchang front page", campusAuto, "http://10.2.5.251/a79.htm", wired, campusWenchang, false},
+		{"shared front page does not identify campus", campusAuto, "http://10.2.5.251/a79.htm", wired, "", true},
 		{"shared backend plus student wifi is still ambiguous", campusAuto, "http://10.2.5.251:801/eportal/", wifi, "", true},
 		{"shared backend on ethernet is ambiguous", campusAuto, "http://10.2.5.251:801/eportal/", wired, "", true},
 		{"ssid alone is insufficient", campusAuto, "", wifi, "", true},
@@ -38,9 +38,15 @@ func TestCampusSelectionDoesNotGuessFromSharedHost(t *testing.T) {
 			}
 		})
 	}
+	if site, err := chooseCampus(campusAuto, "http://10.2.5.251/a79.htm", wifi, campusNanhu); err != nil || site != campusNanhu {
+		t.Fatalf("shared front page overrode Nanhu fingerprint: %q, %v", site, err)
+	}
+	if site, err := chooseCampus(campusAuto, "http://example.com/redirect", wifi, campusNanhu); err != nil || site != campusNanhu {
+		t.Fatalf("unknown redirect overrode verified Nanhu fingerprint: %q, %v", site, err)
+	}
 }
 
-func TestWenchangFingerprintRequiresGatewayMACAndSubnet(t *testing.T) {
+func TestCampusFingerprintRequiresGatewayMACAndSubnet(t *testing.T) {
 	wired := linkState{kind: "ethernet", ipv4: "10.52.157.34"}
 	wifi := linkState{kind: "wifi", ssid: "CUMT_Stu", ipv4: "10.52.136.46"}
 	for _, link := range []linkState{wired, wifi} {
@@ -54,12 +60,18 @@ func TestWenchangFingerprintRequiresGatewayMACAndSubnet(t *testing.T) {
 	if got := campusFromFingerprint(linkState{ipv4: "10.53.136.46"}, "10.52.191.254", "7C-1E-06-8F-98-02"); got != "" {
 		t.Fatal("nonmatching subnet was classified as Wenchang")
 	}
+	if got := campusFromFingerprint(linkState{kind: "wifi", ssid: "CUMT_Stu", ipv4: "10.3.233.69"}, "10.3.255.254", "80-05-88-46-B4-F9"); got != campusNanhu {
+		t.Fatal("known Nanhu link was not matched")
+	}
+	if got := campusFromFingerprint(linkState{ipv4: "10.3.233.69"}, "10.3.255.254", "7C-1E-06-8F-98-02"); got != "" {
+		t.Fatal("Nanhu IP without its gateway MAC was incorrectly classified")
+	}
 }
 
 func TestCampusAccountDefaultsAndOverride(t *testing.T) {
 	cfg := config{account: "student"}
-	if cfg.accountFor(campusWenchang) != "student@xyw" || cfg.accountFor(campusNanhu) != "student@cmcc" {
-		t.Fatal("campus account defaults changed")
+	if cfg.accountFor(campusWenchang) != "student@xyw" || cfg.accountFor(campusNanhu) != "student@xyw" {
+		t.Fatal("the verified account realm changed across campuses")
 	}
 	cfg.accountSuffix, cfg.suffixExplicit = "@dx", true
 	if cfg.accountFor(campusNanhu) != "student@dx" {
@@ -69,7 +81,7 @@ func TestCampusAccountDefaultsAndOverride(t *testing.T) {
 
 func TestNanhuLoginMatchesOlderScript(t *testing.T) {
 	var got *url.URL
-	p := &portalClient{cfg: config{account: "student", password: "secret"}}
+	p := &portalClient{cfg: config{account: "student", password: "secret", accountSuffix: "@cmcc", suffixExplicit: true}}
 	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		got = r.URL
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
@@ -85,7 +97,24 @@ func TestNanhuLoginMatchesOlderScript(t *testing.T) {
 		t.Fatalf("Nanhu request parameters differ from older script: account=%q ip=%q mac=%q", q.Get("user_account"), q.Get("wlan_user_ip"), q.Get("wlan_user_mac"))
 	}
 	if q.Has("wlan_ac_name") || q.Has("wlan_ac_ip") {
-		t.Fatal("Nanhu request unexpectedly contains Wenchang access-controller fields")
+		t.Fatal("request without portal metadata unexpectedly contains access-controller fields")
+	}
+}
+
+func TestNanhuSharedFrontPageKeepsVerifiedRequest(t *testing.T) {
+	var got *url.URL
+	p := &portalClient{cfg: config{account: "student", password: "secret"}}
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got = r.URL
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
+	})}
+	portal := "http://10.2.5.251/a79.htm?wlanuserip=10.3.233.69&wlanacname=BRAS&mac=08-26-AE-37-F2-E2"
+	if err := p.login(context.Background(), campusNanhu, portal, "10.3.233.69"); err != nil {
+		t.Fatal(err)
+	}
+	q := got.Query()
+	if q.Get("user_account") != "student@xyw" || q.Get("wlan_user_mac") != "0826AE37F2E2" || q.Get("wlan_ac_name") != "BRAS" {
+		t.Fatalf("Nanhu request lost the working a79 parameters: account=%q mac=%q AC=%q", q.Get("user_account"), q.Get("wlan_user_mac"), q.Get("wlan_ac_name"))
 	}
 }
 

@@ -4,9 +4,9 @@
 
 ## 运行方式
 
-程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。默认 `CAMPUS=auto`：即使外网已经连通，也会读取所选网卡的 IPv4 默认网关及其 MAC；若与已记录的文昌有线／无线样本及 `10.52.128.0/18` 网段同时匹配，就显示文昌。断网时文昌 `/a79.htm` 跳转也能识别文昌。`CUMT_Stu` 是两校区共用的学生无线网名，不能据此认定南湖；两校区也共用认证服务器。若自动识别失败，在 `.env` 增加 `CAMPUS=nanhu` 或 `CAMPUS=wenchang` 后重新启动；显式设置优先于自动推断。南湖网络指纹尚待现场采集。
+程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。默认 `CAMPUS=auto`：读取所选网卡的 IPv4、默认网关及网关 MAC，三项同时匹配已记录样本时识别文昌或南湖。两个校区都可能出现 `/a79.htm`，也共用 `CUMT_Stu` 和认证服务器；这些单独都不能判断校区。若当前网络未匹配样本，可在 `.env` 设置 `CAMPUS=nanhu` 或 `CAMPUS=wenchang`；显式设置优先。两个校区目前各只有少量现场样本，其他网段仍需后续验证。
 
-文昌默认账号后缀为 `@xyw`，南湖沿用旧脚本的 `@cmcc`。若使用其他运营商，在 `.env` 填 `ACCOUNT_SUFFIX=@dx`、`ACCOUNT_SUFFIX=@lt` 等；明确需要空后缀则填 `ACCOUNT_SUFFIX=`。若 `STUDENT_ID` 已含 `@`，直接使用该完整账号。账号和密码不写入日志。
+当前账号已在两校区通过 `@xyw` 登录，因此默认后缀为 `@xyw`，与校区无关。若使用旧脚本的中国移动账号或其他运营商，在 `.env` 填 `ACCOUNT_SUFFIX=@cmcc`、`ACCOUNT_SUFFIX=@dx`、`ACCOUNT_SUFFIX=@lt` 等；明确需要空后缀则填 `ACCOUNT_SUFFIX=`。若 `STUDENT_ID` 已含 `@`，直接使用该完整账号。账号和密码不写入日志。
 
 默认在系统托盘运行，不显示终端：
 
@@ -15,7 +15,7 @@ cd D:\dev\workspace\workspace-26-b\try-codex\wenchang-campus-keeper
 Start-Process .\wenchang-campus-keeper.exe
 ```
 
-双击托盘图标可显示或隐藏日志窗口；点击日志窗口右上角的 × 只会隐藏窗口。只有右键托盘图标选择“退出程序”才会停止程序。启动时直接显示日志窗口可运行 `Start-Process .\wenchang-campus-keeper.exe -ArgumentList '-console'`。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 10 秒显示一次当前状态，每 20 秒检查一次 IPv4 外网。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。断网后才会向认证接口提交账号密码。
+双击托盘图标可显示或隐藏日志窗口；点击日志窗口右上角的 × 只会隐藏窗口。只有右键托盘图标选择“退出程序”才会停止程序。启动时直接显示日志窗口可运行 `Start-Process .\wenchang-campus-keeper.exe -ArgumentList '-console'`。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 20 秒检查一次 IPv4 外网。外网正常时约每分钟记录一条状态，不重复记录每次正常检查；断网时保持较密集的状态输出。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。无线网卡短暂消失会先等待 2 秒复核。断网后才会向认证接口提交账号密码。
 
 ## 重试和恢复
 
@@ -23,8 +23,7 @@ Start-Process .\wenchang-campus-keeper.exe
 - 每天北京时间 **06:00** 清零退避。程序重启后也从基础退避开始。
 - 优先使用已有 IPv4 的有线网卡；有线不可用时，调用 Windows WLAN API 连接已保存的 `CUMT_Stu` 配置，取得 IPv4 后再检查外网并尝试网页认证。配置即使设为“手动连接”，程序运行时仍可发起连接。若无线网已连接其他网络，程序不会强制切换。两种接口都不可用时持续重试，Wi-Fi 连接请求采用指数退避，最多五分钟。程序不会主动断开现有连接。
 - 外网检测及认证请求绑定到当前选中网卡的 IPv4 地址；网络切换时清除旧认证缓存。未呈现校园网特征的网络只检测外网，不发送校园网账号密码。
-- 当前认证页为 `10.2.5.251/a79.htm`，其配置对应 `:801/eportal/?c=Portal&a=login`。程序优先通过认证跳转获取 IP、MAC 和 BRAS 名称。若跳转发现失败，可在 `.env` 指定 `PORTAL_URL=http://10.2.5.251/a79.htm` 作为后备入口；此时可能缺少跳转中的 MAC 和 BRAS 参数。
-- 南湖流程按原 `clogin.bat` 构造 eportal 请求，使用本机 IPv4 和脚本原有的全零 MAC 参数。两校区的认证请求只发送到已知服务器 `10.2.5.251:801`；未知跳转不会接收账号密码。
+- 两校区都可能出现 `10.2.5.251/a79.htm`，认证请求送往固定的 `:801/eportal/?c=Portal&a=login`。程序优先从认证跳转读取 MAC 和 BRAS 参数；跳转没有这些参数时采用旧脚本的全零 MAC 请求。若跳转发现失败，可在 `.env` 指定 `PORTAL_URL=http://10.2.5.251/a79.htm` 作为后备入口。账号密码只发送到固定的已知服务器 `10.2.5.251:801`。
 - 认证接口的返回值只表示请求被接受；程序以实际 IPv4 外网探测作为恢复成功的最终判据。
 
 ## 开机常驻
@@ -39,7 +38,7 @@ Start-Process .\wenchang-campus-keeper.exe
 
 查看任务：`Get-ScheduledTask -TaskName WenchangCampusKeeper`。停止：`Stop-ScheduledTask -TaskName WenchangCampusKeeper`。计划任务与手动运行不可同时启动，程序用单实例锁防止重复登录。
 
-远程使用期间，电脑需保持通电且不进入睡眠；程序无法在关机、休眠或网线物理断开时维持远程连接。
+远程使用期间，电脑需保持通电且不进入睡眠。有线断开后程序可转接已保存的 Wi-Fi，但切换、DHCP 和认证期间仍会短暂断网，远程会话能否自动恢复取决于远程软件。
 
 日志写在同目录 `keeper.log`，达到 5 MiB 后归档为带时间戳的文件，不自动永久删除。`.env`、日志、可执行文件和缓存均已加入 `.gitignore`。
 

@@ -37,6 +37,22 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestProbeDoesNotWaitForSlowPrimaryWhenHTTPSWorks(t *testing.T) {
+	p := &portalClient{}
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "www.msftconnecttest.com" {
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header)}, nil
+	})}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if result := p.probe(ctx); !result.online {
+		t.Fatalf("working HTTPS should win without waiting for the slow probe: %+v", result)
+	}
+}
+
 func TestWenchangLoginRequestMatchesPortal(t *testing.T) {
 	var got *url.URL
 	p := &portalClient{cfg: config{account: "student", password: "secret"}}

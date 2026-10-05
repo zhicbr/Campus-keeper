@@ -17,14 +17,18 @@ const (
 )
 
 var wenchangObservedSubnet = &net.IPNet{IP: net.IPv4(10, 52, 128, 0), Mask: net.CIDRMask(18, 32)}
+var nanhuObservedSubnet = &net.IPNet{IP: net.IPv4(10, 3, 0, 0), Mask: net.CIDRMask(16, 32)}
 
-// This exact gateway and subnet have been observed on both Wenchang Ethernet
-// and CUMT_Stu Wi-Fi. A loose IP or SSID match is deliberately insufficient.
+// These gateway/subnet combinations are site observations, not global campus
+// ranges. A loose IP, front-page URL, or SSID match is insufficient.
 func campusFromFingerprint(link linkState, gateway, gatewayMAC string) campus {
 	ip := net.ParseIP(link.ipv4).To4()
 	mac := strings.ToUpper(strings.ReplaceAll(gatewayMAC, ":", "-"))
 	if ip != nil && wenchangObservedSubnet.Contains(ip) && gateway == "10.52.191.254" && mac == "7C-1E-06-8F-98-02" {
 		return campusWenchang
+	}
+	if ip != nil && nanhuObservedSubnet.Contains(ip) && gateway == "10.3.255.254" && mac == "80-05-88-46-B4-F9" {
+		return campusNanhu
 	}
 	return ""
 }
@@ -33,7 +37,7 @@ type portalKind uint8
 
 const (
 	portalUnknown portalKind = iota
-	portalWenchang
+	portalSharedFrontPage
 	portalSharedEportal
 )
 
@@ -48,8 +52,8 @@ func campusName(site campus) string {
 	}
 }
 
-// Both campus flows use the same eportal backend. Its host alone cannot
-// identify the campus; the a79 front page is the Wenchang-specific evidence.
+// Both campuses use the same eportal backend and can show the a79 front page.
+// Neither URL identifies the campus; they only establish a trusted endpoint.
 func classifyPortal(raw string) (portalKind, error) {
 	if raw == "" {
 		return portalUnknown, nil
@@ -61,7 +65,7 @@ func classifyPortal(raw string) (portalKind, error) {
 	path := strings.ToLower(u.Path)
 	switch {
 	case path == "/a79.htm":
-		return portalWenchang, nil
+		return portalSharedFrontPage, nil
 	case path == "/eportal" || strings.HasPrefix(path, "/eportal/"):
 		return portalSharedEportal, nil
 	default:
@@ -70,22 +74,22 @@ func classifyPortal(raw string) (portalKind, error) {
 }
 
 func chooseCampus(mode campus, portal string, link linkState, remembered campus) (campus, error) {
-	kind, err := classifyPortal(portal)
+	_, err := classifyPortal(portal)
 	if err != nil {
 		if mode == campusWenchang || mode == campusNanhu {
 			return mode, nil // Explicit campus; login still uses the fixed trusted backend.
+		}
+		if remembered == campusWenchang || remembered == campusNanhu {
+			return remembered, nil // Verified fingerprint; ignore the unknown redirect later.
 		}
 		return "", err
 	}
 	if mode != campusAuto {
 		return mode, nil
 	}
-	if kind == portalWenchang {
-		return campusWenchang, nil
-	}
 	if remembered == campusWenchang || remembered == campusNanhu {
 		return remembered, nil
 	}
 	_ = link // SSID CUMT_Stu exists on both campuses, so it cannot identify Nanhu.
-	return "", errors.New("无法可靠识别校区；可在 .env 设置 CAMPUS=nanhu 或 CAMPUS=wenchang")
+	return "", errors.New("无法可靠识别校区；等待网关指纹或在 .env 设置 CAMPUS=nanhu / CAMPUS=wenchang")
 }

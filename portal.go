@@ -61,42 +61,72 @@ func (p *portalClient) setSourceIP(address string) {
 }
 
 func (p *portalClient) probe(ctx context.Context) probeResult {
-	redirect := ""
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		return probeResult{reason: "检测请求配置错误"}
+	// Check the HTTP captive probe and independent HTTPS probe in parallel.
+	// A single slow DNS/TCP timeout must not double the outage detection time.
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		primary  bool
+		online   bool
+		redirect string
+		err      error
 	}
-	resp, err := p.client.Do(request)
-	if err == nil {
+	answers := make(chan answer, 2)
+	check := func(primary bool, target string) {
+		a := answer{primary: primary}
+		request, requestErr := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
+		if requestErr != nil {
+			a.err = requestErr
+			answers <- a
+			return
+		}
+		resp, requestErr := p.client.Do(request)
+		if requestErr != nil {
+			a.err = requestErr
+			answers <- a
+			return
+		}
 		defer resp.Body.Close()
-		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-			if loc, locErr := resp.Location(); locErr == nil {
-				redirect = loc.String()
+		if primary {
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				if loc, locErr := resp.Location(); locErr == nil {
+					a.redirect = loc.String()
+				}
 			}
+			if resp.StatusCode == http.StatusOK {
+				data, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
+				a.online = readErr == nil && strings.TrimSpace(string(data)) == "Microsoft Connect Test"
+			}
+		} else {
+			a.online = resp.StatusCode >= 200 && resp.StatusCode < 300
 		}
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
-		if readErr == nil && resp.StatusCode == http.StatusOK && strings.TrimSpace(string(data)) == "Microsoft Connect Test" {
-			return probeResult{online: true}
-		}
+		answers <- a
 	}
-	// An independent HTTPS check avoids declaring an outage because a single
-	// connectivity-test service or its DNS record is temporarily unavailable.
-	request, _ = http.NewRequestWithContext(ctx, http.MethodGet, "https://www.baidu.com/", nil)
-	backup, backupErr := p.client.Do(request)
-	if backupErr == nil {
-		backup.Body.Close()
-		if backup.StatusCode >= 200 && backup.StatusCode < 400 {
-			return probeResult{online: true}
+	go check(true, probeURL)
+	go check(false, "https://www.baidu.com/")
+	var redirect string
+	var primaryErr error
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ctx.Done():
+			return probeResult{reason: "外网检测已取消"}
+		case a := <-answers:
+			if a.online {
+				return probeResult{online: true}
+			}
+			if a.primary {
+				redirect, primaryErr = a.redirect, a.err
+			}
 		}
 	}
 	if redirect != "" {
 		return probeResult{redirect: redirect, reason: "被重定向到校园网认证页"}
 	}
 	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if errors.As(primaryErr, &dnsErr) {
 		return probeResult{reason: "DNS 无法解析外网检测域名"}
 	}
-	if err != nil {
+	if primaryErr != nil {
 		return probeResult{reason: "外网检测地址不可达"}
 	}
 	return probeResult{reason: "外网检测地址返回非预期内容"}
@@ -135,7 +165,7 @@ func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP
 	if _, err := classifyPortal(portal); err != nil {
 		return err
 	}
-	// The older Nanhu script and verified Wenchang flow both use this backend.
+	// Both campuses use this backend. The a79 page is shared as well.
 	// Never derive a credential-bearing destination from an arbitrary redirect.
 	base, _ := url.Parse("http://10.2.5.251:801/eportal/")
 	q := url.Values{}
@@ -162,7 +192,7 @@ func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP
 		"wlan_user_ip": {ip}, "wlan_user_mac": {"000000000000"},
 		"jsVersion": {"3.0"},
 	}
-	if site == campusWenchang {
+	if q.Get("mac") != "" || q.Get("wlanacname") != "" || q.Get("wlanacip") != "" {
 		mac := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac"))
 		if len(mac) == 12 {
 			params.Set("wlan_user_mac", mac)

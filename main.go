@@ -16,32 +16,34 @@ import (
 )
 
 const (
-	healthInterval = 20 * time.Second
-	linkInterval   = 5 * time.Second
-	statusInterval = 10 * time.Second
-	retryBase      = 5 * time.Second
-	retryMax       = 5 * time.Minute
+	healthInterval       = 20 * time.Second
+	linkInterval         = 5 * time.Second
+	statusInterval       = 10 * time.Second
+	onlineStatusInterval = time.Minute
+	retryBase            = 5 * time.Second
+	retryMax             = 5 * time.Minute
 )
 
 type controller struct {
-	cfg          config
-	portal       *portalClient
-	logger       *log.Logger
-	ui           *trayUI
-	quiet        bool
-	state        string
-	campus       campus
-	lastPortal   string
-	link         linkState
-	backoff      time.Duration
-	nextRetry    time.Time
-	retryTimer   *time.Timer
-	retryChannel <-chan time.Time
-	wifiBackoff  time.Duration
-	nextWiFiTry  time.Time
-	wifiTimer    *time.Timer
-	wifiChannel  <-chan time.Time
-	nextReset    time.Time
+	cfg           config
+	portal        *portalClient
+	logger        *log.Logger
+	ui            *trayUI
+	quiet         bool
+	state         string
+	campus        campus
+	lastPortal    string
+	link          linkState
+	backoff       time.Duration
+	nextRetry     time.Time
+	retryTimer    *time.Timer
+	retryChannel  <-chan time.Time
+	wifiBackoff   time.Duration
+	nextWiFiTry   time.Time
+	wifiTimer     *time.Timer
+	wifiChannel   <-chan time.Time
+	nextReset     time.Time
+	lastStatusLog time.Time
 }
 
 func main() {
@@ -145,8 +147,9 @@ func (c *controller) run(ctx context.Context) error {
 			if c.resetAtSixIfDue() && c.state != "online" {
 				_ = c.cycle(ctx, "06:00 退避清零")
 			}
-			if !c.quiet {
+			if !c.quiet && (c.state != "online" || time.Since(c.lastStatusLog) >= onlineStatusInterval) {
 				c.logger.Printf("当前状态：%s", c.status())
+				c.lastStatusLog = time.Now()
 			}
 		case <-sixTimer.C:
 			reset := c.resetAtSixIfDue()
@@ -168,7 +171,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.portal.setSourceIP(c.link.ipv4)
 	c.detectCampusFromLink()
 	probeLink := c.link
-	if !c.quiet {
+	if !c.quiet && (reason != "定期外网检查" || c.state != "online") {
 		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
 	}
 	result := c.portal.probe(ctx)
@@ -212,6 +215,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		c.setState("link-down", "校园网接口未就绪："+c.link.describe())
 		return errors.New("校园网接口未就绪")
 	}
+	c.detectCampusFromLink()
 	c.setState("offline", "IPv4 外网中断："+result.reason)
 	if !isCampusLink(c.link) {
 		return errors.New("当前接口没有校园网特征，等待网络恢复")
@@ -245,9 +249,6 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if c.campus != site {
 		c.logger.Printf("已选择%s校区认证流程", campusName(site))
 		c.campus = site
-	}
-	if kind, _ := classifyPortal(portal); kind == portalWenchang && site == campusNanhu {
-		c.logger.Print("提示：CAMPUS=nanhu 已覆盖 /a79.htm 的文昌自动推断；请现场核对校区")
 	}
 	if _, portalErr := classifyPortal(portal); portalErr != nil {
 		c.logger.Printf("忽略未知认证跳转 %s；仅使用已知校园网服务器", safePortal(portal))
