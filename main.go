@@ -166,12 +166,14 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	c.resetWiFiRetry()
 	c.portal.setSourceIP(c.link.ipv4)
+	c.detectCampusFromLink()
 	probeLink := c.link
 	if !c.quiet {
 		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
 	}
 	result := c.portal.probe(ctx)
 	if result.online {
+		c.detectCampusFromLink()
 		c.setState("online", "IPv4 外网已连通")
 		c.resetRetry()
 		return nil
@@ -192,6 +194,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		}
 		second := c.portal.probe(ctx)
 		if second.online {
+			c.detectCampusFromLink()
 			c.setState("online", "IPv4 外网已恢复")
 			c.resetRetry()
 			return nil
@@ -226,10 +229,10 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 			portal = found
 		} else {
 			portal = c.cfg.portalURL
-			if portal == "" && c.cfg.campusMode == campusWenchang {
+			if portal == "" && (c.cfg.campusMode == campusWenchang || c.campus == campusWenchang) {
 				portal = "http://10.2.5.251/a79.htm"
 			}
-			if portal == "" && c.cfg.campusMode == campusNanhu {
+			if portal == "" && (c.cfg.campusMode == campusNanhu || c.campus == campusNanhu) {
 				portal = "http://10.2.5.251:801/eportal/"
 			}
 		}
@@ -412,6 +415,20 @@ func isCampusLink(link linkState) bool {
 	}
 	ip := net.ParseIP(link.ipv4).To4()
 	return ip != nil && ip[0] == 10
+}
+
+func (c *controller) detectCampusFromLink() {
+	if c.cfg.campusMode != campusAuto || c.campus != "" || !c.link.ready() {
+		return
+	}
+	gateway, mac, err := gatewayFingerprint(c.link.index)
+	if err != nil {
+		return // Neighbor cache may be populated by the following HTTP probe.
+	}
+	if site := campusFromFingerprint(c.link, gateway, mac); site != "" {
+		c.campus = site
+		c.logger.Printf("本地网络特征匹配%s：网关 %s，网关 MAC %s；当前 IPv4 %s", campusName(site), gateway, mac, c.link.ipv4)
+	}
 }
 
 func (c *controller) resetRetry() {

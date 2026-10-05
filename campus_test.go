@@ -40,6 +40,22 @@ func TestCampusSelectionDoesNotGuessFromSharedHost(t *testing.T) {
 	}
 }
 
+func TestWenchangFingerprintRequiresGatewayMACAndSubnet(t *testing.T) {
+	wired := linkState{kind: "ethernet", ipv4: "10.52.157.34"}
+	wifi := linkState{kind: "wifi", ssid: "CUMT_Stu", ipv4: "10.52.136.46"}
+	for _, link := range []linkState{wired, wifi} {
+		if got := campusFromFingerprint(link, "10.52.191.254", "7C-1E-06-8F-98-02"); got != campusWenchang {
+			t.Fatalf("known Wenchang link %s was not matched", link.ipv4)
+		}
+	}
+	if got := campusFromFingerprint(linkState{kind: "wifi", ssid: "CUMT_Stu", ipv4: "10.52.136.46"}, "10.52.191.254", "00-11-22-33-44-55"); got != "" {
+		t.Fatal("student SSID and IP incorrectly overrode a different gateway MAC")
+	}
+	if got := campusFromFingerprint(linkState{ipv4: "10.53.136.46"}, "10.52.191.254", "7C-1E-06-8F-98-02"); got != "" {
+		t.Fatal("nonmatching subnet was classified as Wenchang")
+	}
+}
+
 func TestCampusAccountDefaultsAndOverride(t *testing.T) {
 	cfg := config{account: "student"}
 	if cfg.accountFor(campusWenchang) != "student@xyw" || cfg.accountFor(campusNanhu) != "student@cmcc" {

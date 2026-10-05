@@ -4,7 +4,7 @@
 
 ## 运行方式
 
-程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。默认 `CAMPUS=auto`：文昌 `/a79.htm` 跳转选文昌。`CUMT_Stu` 是两校区共用的学生无线网名，不能据此认定南湖；两校区也共用认证服务器。若自动识别失败，在 `.env` 增加 `CAMPUS=nanhu` 或 `CAMPUS=wenchang` 后重新启动；显式设置优先于自动推断，切换校区时应相应修改或恢复 `auto`。
+程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。默认 `CAMPUS=auto`：即使外网已经连通，也会读取所选网卡的 IPv4 默认网关及其 MAC；若与已记录的文昌有线／无线样本及 `10.52.128.0/18` 网段同时匹配，就显示文昌。断网时文昌 `/a79.htm` 跳转也能识别文昌。`CUMT_Stu` 是两校区共用的学生无线网名，不能据此认定南湖；两校区也共用认证服务器。若自动识别失败，在 `.env` 增加 `CAMPUS=nanhu` 或 `CAMPUS=wenchang` 后重新启动；显式设置优先于自动推断。南湖网络指纹尚待现场采集。
 
 文昌默认账号后缀为 `@xyw`，南湖沿用旧脚本的 `@cmcc`。若使用其他运营商，在 `.env` 填 `ACCOUNT_SUFFIX=@dx`、`ACCOUNT_SUFFIX=@lt` 等；明确需要空后缀则填 `ACCOUNT_SUFFIX=`。若 `STUDENT_ID` 已含 `@`，直接使用该完整账号。账号和密码不写入日志。
 

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -14,6 +15,19 @@ const (
 	campusWenchang campus = "wenchang"
 	campusNanhu    campus = "nanhu"
 )
+
+var wenchangObservedSubnet = &net.IPNet{IP: net.IPv4(10, 52, 128, 0), Mask: net.CIDRMask(18, 32)}
+
+// This exact gateway and subnet have been observed on both Wenchang Ethernet
+// and CUMT_Stu Wi-Fi. A loose IP or SSID match is deliberately insufficient.
+func campusFromFingerprint(link linkState, gateway, gatewayMAC string) campus {
+	ip := net.ParseIP(link.ipv4).To4()
+	mac := strings.ToUpper(strings.ReplaceAll(gatewayMAC, ":", "-"))
+	if ip != nil && wenchangObservedSubnet.Contains(ip) && gateway == "10.52.191.254" && mac == "7C-1E-06-8F-98-02" {
+		return campusWenchang
+	}
+	return ""
+}
 
 type portalKind uint8
 
