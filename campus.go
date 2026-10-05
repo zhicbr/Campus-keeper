@@ -72,8 +72,6 @@ func chooseCampus(mode campus, portal string, link linkState, remembered campus)
 	if remembered == campusWenchang || remembered == campusNanhu {
 		return remembered, nil
 	}
-	if kind == portalSharedEportal && link.kind == "wifi" && strings.EqualFold(link.ssid, "CUMT_Stu") {
-		return campusNanhu, nil
-	}
+	_ = link // SSID CUMT_Stu exists on both campuses, so it cannot identify Nanhu.
 	return "", errors.New("无法可靠识别校区；可在 .env 设置 CAMPUS=nanhu 或 CAMPUS=wenchang")
 }

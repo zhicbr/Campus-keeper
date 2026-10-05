@@ -23,7 +23,7 @@ func TestCampusSelectionDoesNotGuessFromSharedHost(t *testing.T) {
 		fail   bool
 	}{
 		{"wenchang front page", campusAuto, "http://10.2.5.251/a79.htm", wired, campusWenchang, false},
-		{"nanhu wifi plus shared backend", campusAuto, "http://10.2.5.251:801/eportal/", wifi, campusNanhu, false},
+		{"shared backend plus student wifi is still ambiguous", campusAuto, "http://10.2.5.251:801/eportal/", wifi, "", true},
 		{"shared backend on ethernet is ambiguous", campusAuto, "http://10.2.5.251:801/eportal/", wired, "", true},
 		{"ssid alone is insufficient", campusAuto, "", wifi, "", true},
 		{"manual nanhu works without redirect", campusNanhu, "", wired, campusNanhu, false},

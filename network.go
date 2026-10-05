@@ -115,20 +115,28 @@ func readLink(previous linkState) linkState {
 		for _, iface := range interfaces {
 			if iface.Index == previous.index || iface.Name == previous.name {
 				old = snapshotInterface(iface)
-				if old.ready() && strings.HasPrefix(old.ipv4, "10.") {
-					return withSSID(old)
-				}
 				break
 			}
 		}
 	}
-	// Prefer a physical wired campus link, then campus Wi-Fi. Virtual adapters
-	// must not be used to decide where credentials should be sent.
+	// Always check Ethernet first, even when Wi-Fi was selected previously. This
+	// lets a restored cable take priority without restarting the application.
 	for _, kind := range []string{"ethernet", "wifi"} {
 		for _, iface := range interfaces {
 			s := snapshotInterface(iface)
-			if s.kind == kind && s.up && strings.HasPrefix(s.ipv4, "10.") && len(iface.HardwareAddr) > 0 {
+			if s.kind == kind && s.ready() && len(iface.HardwareAddr) > 0 {
 				return withSSID(s)
+			}
+		}
+	}
+	// A WLAN may have associated but still be waiting for DHCP. Surface that
+	// state before falling back to a stale, disconnected Ethernet adapter.
+	for _, iface := range interfaces {
+		s := snapshotInterface(iface)
+		if s.kind == "wifi" && s.up && len(iface.HardwareAddr) > 0 {
+			s = withSSID(s)
+			if s.ssid != "" {
+				return s
 			}
 		}
 	}

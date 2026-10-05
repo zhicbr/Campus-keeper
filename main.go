@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,6 +37,10 @@ type controller struct {
 	nextRetry    time.Time
 	retryTimer   *time.Timer
 	retryChannel <-chan time.Time
+	wifiBackoff  time.Duration
+	nextWiFiTry  time.Time
+	wifiTimer    *time.Timer
+	wifiChannel  <-chan time.Time
 	nextReset    time.Time
 }
 
@@ -74,13 +79,10 @@ func main() {
 	c := &controller{
 		cfg: cfg, portal: newPortalClient(cfg), logger: logger,
 		ui: ui, quiet: *quiet, backoff: retryBase, retryTimer: time.NewTimer(time.Hour),
+		wifiBackoff: retryBase, wifiTimer: time.NewTimer(time.Hour),
 	}
-	if !c.retryTimer.Stop() {
-		select {
-		case <-c.retryTimer.C:
-		default:
-		}
-	}
+	stopTimer(c.retryTimer)
+	stopTimer(c.wifiTimer)
 	c.nextReset = nextSix(time.Now())
 	logger.Printf("校园网守护程序启动；账号 %s；校区模式 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), cfg.campusMode, healthInterval, linkInterval)
 	if *once {
@@ -116,6 +118,7 @@ func (c *controller) run(ctx context.Context) error {
 	defer statusTicker.Stop()
 	defer sixTimer.Stop()
 	defer c.retryTimer.Stop()
+	defer c.wifiTimer.Stop()
 	_ = c.cycle(ctx, "启动检查")
 	for {
 		select {
@@ -134,8 +137,12 @@ func (c *controller) run(ctx context.Context) error {
 			c.retryChannel = nil
 			c.resetAtSixIfDue()
 			_ = c.cycle(ctx, "认证重试")
+		case <-c.wifiChannel:
+			c.wifiChannel = nil
+			c.resetAtSixIfDue()
+			_ = c.cycle(ctx, "Wi-Fi 重试")
 		case <-statusTicker.C:
-			if c.resetAtSixIfDue() && c.state == "offline" {
+			if c.resetAtSixIfDue() && c.state != "online" {
 				_ = c.cycle(ctx, "06:00 退避清零")
 			}
 			if !c.quiet {
@@ -144,7 +151,7 @@ func (c *controller) run(ctx context.Context) error {
 		case <-sixTimer.C:
 			reset := c.resetAtSixIfDue()
 			sixTimer.Reset(time.Until(c.nextReset))
-			if reset && c.state == "offline" {
+			if reset && c.state != "online" {
 				_ = c.cycle(ctx, "06:00 退避清零")
 			}
 		}
@@ -155,9 +162,10 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.resetAtSixIfDue()
 	c.refreshLink()
 	if !c.link.ready() {
-		c.setState("link-down", fmt.Sprintf("校园网接口未就绪（%s）；等待网线、Wi-Fi 或 DHCP 恢复", c.link.describe()))
-		return errors.New("校园网接口未就绪")
+		return c.ensureWiFi()
 	}
+	c.resetWiFiRetry()
+	c.portal.setSourceIP(c.link.ipv4)
 	probeLink := c.link
 	if !c.quiet {
 		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
@@ -202,6 +210,9 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return errors.New("校园网接口未就绪")
 	}
 	c.setState("offline", "IPv4 外网中断："+result.reason)
+	if !isCampusLink(c.link) {
+		return errors.New("当前接口没有校园网特征，等待网络恢复")
+	}
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		if !c.quiet {
 			c.logger.Printf("认证退避中，预计 %s 后重试", time.Until(c.nextRetry).Round(time.Second))
@@ -300,6 +311,9 @@ func (c *controller) status() string {
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		s += "；下次认证约 " + time.Until(c.nextRetry).Round(time.Second).String() + " 后"
 	}
+	if !c.nextWiFiTry.IsZero() && time.Now().Before(c.nextWiFiTry) {
+		s += "；下次 Wi-Fi 检查约 " + time.Until(c.nextWiFiTry).Round(time.Second).String() + " 后"
+	}
 	return s
 }
 
@@ -311,6 +325,10 @@ func stateName(s string) string {
 		return "外网中断"
 	case "link-down":
 		return "校园网接口未就绪"
+	case "wifi-connecting":
+		return "正在连接 Wi-Fi"
+	case "wifi-wait-ip":
+		return "Wi-Fi 已连接，等待 IPv4"
 	default:
 		return "待检查"
 	}
@@ -331,6 +349,71 @@ func (c *controller) scheduleRetry(reason string) {
 	c.backoff = min(c.backoff*2, retryMax)
 }
 
+func (c *controller) ensureWiFi() error {
+	if !c.nextWiFiTry.IsZero() && time.Now().Before(c.nextWiFiTry) {
+		return errors.New("等待 Wi-Fi 连接或重试")
+	}
+	status, err := requestSavedWiFi(studentWiFiProfile)
+	if err != nil {
+		c.setState("link-down", fmt.Sprintf("有线网不可用；Wi-Fi %s 未接入：%v", studentWiFiProfile, err))
+		c.scheduleWiFiRetry(true)
+		c.logger.Printf("Wi-Fi 连接失败：%v；%s 后重试", err, time.Until(c.nextWiFiTry).Round(time.Second))
+		return err
+	}
+	if status == "已连接" {
+		c.setState("wifi-wait-ip", "有线网不可用；无线网已连接，等待 IPv4 地址")
+		c.scheduleWiFiRetry(false)
+		return errors.New("Wi-Fi 等待 IPv4 地址")
+	}
+	c.setState("wifi-connecting", fmt.Sprintf("有线网不可用；%s %s", studentWiFiProfile, status))
+	if status == "已请求连接" {
+		c.logger.Printf("有线网不可用，已请求 Windows 连接已保存的 Wi-Fi %s；等待关联和 IPv4 地址", studentWiFiProfile)
+	}
+	c.scheduleWiFiRetry(status == "已请求连接")
+	return errors.New("Wi-Fi 正在连接")
+}
+
+func (c *controller) scheduleWiFiRetry(grow bool) {
+	delay := 10 * time.Second
+	if grow {
+		delay = c.wifiBackoff
+		c.wifiBackoff = min(c.wifiBackoff*2, retryMax)
+	}
+	c.nextWiFiTry = time.Now().Add(delay)
+	if c.wifiTimer != nil {
+		stopTimer(c.wifiTimer)
+		c.wifiTimer.Reset(delay)
+		c.wifiChannel = c.wifiTimer.C
+	}
+}
+
+func (c *controller) resetWiFiRetry() {
+	c.wifiBackoff = retryBase
+	c.nextWiFiTry = time.Time{}
+	c.wifiChannel = nil
+	stopTimer(c.wifiTimer)
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func isCampusLink(link linkState) bool {
+	if link.kind == "wifi" && link.ssid == studentWiFiProfile {
+		return true
+	}
+	ip := net.ParseIP(link.ipv4).To4()
+	return ip != nil && ip[0] == 10
+}
+
 func (c *controller) resetRetry() {
 	c.backoff = retryBase
 	c.nextRetry = time.Time{}
@@ -349,12 +432,18 @@ func (c *controller) resetAtSixIfDue() bool {
 		return false
 	}
 	c.backoff = retryBase
+	c.wifiBackoff = retryBase
 	c.nextReset = nextSix(now)
 	c.logger.Printf("已到每天 06:00：指数退避清零；下次清零时间 %s", c.nextReset.Format("2006-01-02 15:04"))
 	if !c.nextRetry.IsZero() {
 		c.nextRetry = time.Time{}
 		c.retryChannel = nil
 		c.retryTimer.Stop()
+	}
+	if !c.nextWiFiTry.IsZero() {
+		c.nextWiFiTry = time.Time{}
+		c.wifiChannel = nil
+		stopTimer(c.wifiTimer)
 	}
 	return true
 }

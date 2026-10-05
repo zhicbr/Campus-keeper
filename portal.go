@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,21 +24,40 @@ type probeResult struct {
 }
 
 type portalClient struct {
-	client *http.Client
-	cfg    config
+	client   *http.Client
+	cfg      config
+	mu       sync.RWMutex
+	sourceIP net.IP
 }
 
 func newPortalClient(cfg config) *portalClient {
+	p := &portalClient{cfg: cfg}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DisableKeepAlives = true
 	transport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp4", address)
+		dialer := &net.Dialer{Timeout: 5 * time.Second}
+		p.mu.RLock()
+		ip := p.sourceIP
+		p.mu.RUnlock()
+		if ip != nil {
+			dialer.LocalAddr = &net.TCPAddr{IP: ip}
+		}
+		return dialer.DialContext(ctx, "tcp4", address)
 	}
-	return &portalClient{cfg: cfg, client: &http.Client{
+	p.client = &http.Client{
 		Timeout: 6 * time.Second, Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
+	}
+	return p
+}
+
+// All HTTP operations run on the controller goroutine. Binding the source
+// address makes the selected Ethernet/WLAN priority effective for probes too.
+func (p *portalClient) setSourceIP(address string) {
+	p.mu.Lock()
+	p.sourceIP = net.ParseIP(address).To4()
+	p.mu.Unlock()
 }
 
 func (p *portalClient) probe(ctx context.Context) probeResult {
