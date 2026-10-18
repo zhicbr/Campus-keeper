@@ -11,11 +11,12 @@ import (
 // rotatingLog keeps the active log small. Archived logs remain available for
 // diagnostics; the program does not permanently delete user files.
 type rotatingLog struct {
-	mu   sync.Mutex
-	path string
-	file *os.File
-	size int64
-	max  int64
+	mu     sync.Mutex
+	path   string
+	file   *os.File
+	size   int64
+	max    int64
+	silent bool
 }
 
 func newRotatingLog(path string, max int64) (*rotatingLog, error) {
@@ -34,7 +35,9 @@ func newRotatingLog(path string, max int64) (*rotatingLog, error) {
 func (w *rotatingLog) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	writeConsole(p)
+	if !w.silent {
+		writeConsole(p)
+	}
 	if w.size+int64(len(p)) > w.max {
 		if err := w.rotate(); err != nil {
 			return 0, err

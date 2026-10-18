@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -15,6 +16,7 @@ var (
 	wlanEnumInterfaces = wlanAPI.NewProc("WlanEnumInterfaces")
 	wlanQueryInterface = wlanAPI.NewProc("WlanQueryInterface")
 	wlanConnect        = wlanAPI.NewProc("WlanConnect")
+	wlanDisconnect     = wlanAPI.NewProc("WlanDisconnect")
 	wlanFreeMemory     = wlanAPI.NewProc("WlanFreeMemory")
 )
 
@@ -62,7 +64,7 @@ type wlanConnection struct {
 // requestSavedWiFi asks Windows to connect using an existing profile. The
 // request is asynchronous; IP acquisition is observed by monitorLink.
 // A connected or connecting WLAN is never replaced by this program.
-func requestSavedWiFi(profile string) (string, error) {
+func requestSavedWiFi(profile string, diagnostic *diagnostics) (string, error) {
 	if err := wlanOpenHandle.Find(); err != nil {
 		return "", fmt.Errorf("Windows WLAN API 不可用：%w", err)
 	}
@@ -87,6 +89,9 @@ func requestSavedWiFi(profile string) (string, error) {
 	var disconnected *wlanInterfaceInfo
 	for i := uint32(0); i < count; i++ {
 		info := (*wlanInterfaceInfo)(unsafe.Pointer(base + uintptr(i)*unsafe.Sizeof(wlanInterfaceInfo{})))
+		if diagnostic != nil {
+			diagnostic.log.Printf("wifi native check guid=%x state=%d", info.guid, info.state)
+		}
 		switch info.state {
 		case 1: // connected: preserve whatever network the user selected.
 			return "已连接", nil
@@ -106,11 +111,75 @@ func requestSavedWiFi(profile string) (string, error) {
 		return "", err
 	}
 	params := wlanConnectionParameters{mode: 0, profile: name, bssType: 1} // profile, infrastructure
+	if diagnostic != nil {
+		diagnostic.log.Printf("WlanConnect CALL guid=%x profile=%q state=%d", disconnected.guid, profile, disconnected.state)
+	}
 	code, _, _ = wlanConnect.Call(handle, uintptr(unsafe.Pointer(&disconnected.guid)), uintptr(unsafe.Pointer(&params)), 0)
+	if diagnostic != nil {
+		diagnostic.log.Printf("WlanConnect RETURN code=%d", code)
+	}
 	if code != 0 {
 		return "", fmt.Errorf("请求连接 Wi-Fi %s 失败：Windows 错误码 %d", profile, code)
 	}
 	return "已请求连接", nil
+}
+
+// reconnectSavedWiFi disconnects the current Wi-Fi association and reconnects to profile.
+// This is used to break out of a black-hole AP where the gateway is unreachable.
+func reconnectSavedWiFi(profile string, diagnostic *diagnostics) error {
+	if err := wlanOpenHandle.Find(); err != nil {
+		return fmt.Errorf("Windows WLAN API 不可用：%w", err)
+	}
+	var version uint32
+	var handle uintptr
+	code, _, _ := wlanOpenHandle.Call(2, 0, uintptr(unsafe.Pointer(&version)), uintptr(unsafe.Pointer(&handle)))
+	if code != 0 || handle == 0 {
+		return fmt.Errorf("打开 Windows WLAN 失败：错误码 %d", code)
+	}
+	defer wlanCloseHandle.Call(handle, 0)
+	var list uintptr
+	code, _, _ = wlanEnumInterfaces.Call(handle, 0, uintptr(unsafe.Pointer(&list)))
+	if code != 0 || list == 0 {
+		return fmt.Errorf("枚举无线网卡失败：错误码 %d", code)
+	}
+	defer wlanFreeMemory.Call(list)
+	count := *(*uint32)(unsafe.Pointer(list))
+	if count == 0 || count > 32 {
+		return fmt.Errorf("没有可用的无线网卡")
+	}
+	base := list + 8
+	var target *wlanInterfaceInfo
+	for i := uint32(0); i < count; i++ {
+		info := (*wlanInterfaceInfo)(unsafe.Pointer(base + uintptr(i)*unsafe.Sizeof(wlanInterfaceInfo{})))
+		if info.state == 1 { // connected
+			target = info
+			break
+		}
+	}
+	if target == nil {
+		_, err := requestSavedWiFi(profile, diagnostic)
+		return err
+	}
+	name, err := syscall.UTF16PtrFromString(profile)
+	if err != nil {
+		return err
+	}
+	params := wlanConnectionParameters{mode: 0, profile: name, bssType: 1} // profile, infrastructure
+	if diagnostic != nil {
+		diagnostic.log.Printf("reconnectSavedWiFi DISCONNECT guid=%x profile=%q", target.guid, profile)
+	}
+	if wlanDisconnect.Find() == nil {
+		wlanDisconnect.Call(handle, uintptr(unsafe.Pointer(&target.guid)), 0)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if diagnostic != nil {
+		diagnostic.log.Printf("reconnectSavedWiFi CONNECT guid=%x profile=%q", target.guid, profile)
+	}
+	code, _, _ = wlanConnect.Call(handle, uintptr(unsafe.Pointer(&target.guid)), uintptr(unsafe.Pointer(&params)), 0)
+	if code != 0 {
+		return fmt.Errorf("重连 Wi-Fi %s 失败：Windows 错误码 %d", profile, code)
+	}
+	return nil
 }
 
 // connectedSSID calls the native WLAN API without launching netsh every few

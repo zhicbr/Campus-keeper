@@ -86,7 +86,7 @@ func TestNanhuLoginMatchesOlderScript(t *testing.T) {
 		got = r.URL
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
 	})}
-	if err := p.login(context.Background(), campusNanhu, "http://10.2.5.251:801/eportal/", "10.1.2.3"); err != nil {
+	if err := p.login(context.Background(), campusNanhu, "http://10.2.5.251:801/eportal/", "10.1.2.3", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got == nil || got.Host != "10.2.5.251:801" || got.Path != "/eportal/" {
@@ -109,7 +109,7 @@ func TestNanhuSharedFrontPageKeepsVerifiedRequest(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
 	})}
 	portal := "http://10.2.5.251/a79.htm?wlanuserip=10.3.233.69&wlanacname=BRAS&mac=08-26-AE-37-F2-E2"
-	if err := p.login(context.Background(), campusNanhu, portal, "10.3.233.69"); err != nil {
+	if err := p.login(context.Background(), campusNanhu, portal, "10.3.233.69", ""); err != nil {
 		t.Fatal(err)
 	}
 	q := got.Query()

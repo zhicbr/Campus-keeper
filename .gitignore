@@ -2,6 +2,8 @@
 *.log
 *.log.old
 keeper.log.*
+network-diagnostic.log.*
+network-diagnostics-*.zip
 *.exe
 *.exe~
 .gocache/
@@ -9,3 +11,13 @@ keeper.log.*
 .go-cache/
 .go-mod-cache/
 portal-*
+
+# Investigation records and scratch scripts
+Collect-Diagnostics.ps1
+DIAGNOSTICS.md
+FIX-*.md
+INCIDENT-*.md
+ISSUES.md
+REGRESSION-*.md
+analyze_incident.py
+regression_audit.py

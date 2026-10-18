@@ -60,7 +60,7 @@ func TestWenchangLoginRequestMatchesPortal(t *testing.T) {
 		got = r.URL
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
 	})}
-	err := p.login(context.Background(), campusWenchang, "http://10.2.5.251/a79.htm?wlanuserip=10.52.157.34&wlanacname=BRAS&mac=08-26-AE-37-F2-E2", "10.52.157.34")
+	err := p.login(context.Background(), campusWenchang, "http://10.2.5.251/a79.htm?wlanuserip=10.52.157.34&wlanacname=BRAS&mac=08-26-AE-37-F2-E2", "10.52.157.34", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,5 +76,24 @@ func TestWenchangLoginRequestMatchesPortal(t *testing.T) {
 		if q.Get(key) != want {
 			t.Fatalf("%s = %q, want %q", key, q.Get(key), want)
 		}
+	}
+}
+
+func TestLoginUsesInterfaceMACWhenPortalOmitsMAC(t *testing.T) {
+	var got *url.URL
+	p := &portalClient{cfg: config{account: "student", password: "secret"}}
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got = r.URL
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
+	})}
+	err := p.login(context.Background(), campusWenchang, "http://10.2.5.251:801/eportal/?wlanuserip=10.52.157.34", "10.52.157.34", "A4-B1-C2-D3-E4-F5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("no request sent")
+	}
+	if q := got.Query(); q.Get("wlan_user_mac") != "A4B1C2D3E4F5" {
+		t.Fatalf("expected physical MAC to be used when portal query omits it: got %q", q.Get("wlan_user_mac"))
 	}
 }

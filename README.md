@@ -2,6 +2,8 @@
 
 本程序用于 Windows 校园网有线和 Wi-Fi 连接。`version1.0` 标签保留首次跑通文昌认证的基线。可执行文件仍叫 `wenchang-campus-keeper.exe`，以兼容现有启动方式和计划任务。
 
+排查间歇断网时，可带 `-diagnostic` 参数启动或运行名称包含 `diagnostic` 的程序，以开启详细的系统路由及网络现场记录。
+
 ## 运行方式
 
 程序从可执行文件同目录的 `.env` 读取 `STUDENT_ID` 和 `PASSWORD`。默认 `CAMPUS=auto`：读取所选网卡的 IPv4、默认网关及网关 MAC，三项同时匹配已记录样本时识别文昌或南湖。两个校区都可能出现 `/a79.htm`，也共用 `CUMT_Stu` 和认证服务器；这些单独都不能判断校区。若当前网络未匹配样本，可在 `.env` 设置 `CAMPUS=nanhu` 或 `CAMPUS=wenchang`；显式设置优先。两个校区目前各只有少量现场样本，其他网段仍需后续验证。
@@ -11,7 +13,6 @@
 默认在系统托盘运行，不显示终端：
 
 ```powershell
-cd D:\dev\workspace\workspace-26-b\try-codex\wenchang-campus-keeper
 Start-Process .\wenchang-campus-keeper.exe
 ```
 
@@ -23,7 +24,9 @@ Start-Process .\wenchang-campus-keeper.exe
 - 每天北京时间 **06:00** 清零退避。程序重启后也从基础退避开始。
 - 优先使用已有 IPv4 的有线网卡；有线不可用时，调用 Windows WLAN API 连接已保存的 `CUMT_Stu` 配置，取得 IPv4 后再检查外网并尝试网页认证。配置即使设为“手动连接”，程序运行时仍可发起连接。若无线网已连接其他网络，程序不会强制切换。两种接口都不可用时持续重试，Wi-Fi 连接请求采用指数退避，最多五分钟。程序不会主动断开现有连接。
 - 外网检测及认证请求绑定到当前选中网卡的 IPv4 地址；网络切换时清除旧认证缓存。未呈现校园网特征的网络只检测外网，不发送校园网账号密码。
-- 两校区都可能出现 `10.2.5.251/a79.htm`，认证请求送往固定的 `:801/eportal/?c=Portal&a=login`。程序优先从认证跳转读取 MAC 和 BRAS 参数；跳转没有这些参数时采用旧脚本的全零 MAC 请求。若跳转发现失败，可在 `.env` 指定 `PORTAL_URL=http://10.2.5.251/a79.htm` 作为后备入口。账号密码只发送到固定的已知服务器 `10.2.5.251:801`。
+- 两校区都可能出现 `10.2.5.251/a79.htm`，认证请求送往固定的 `:801/eportal/?c=Portal&a=login`。程序优先从本轮认证跳转读取 MAC；跳转未携带 MAC 时自动使用当前网卡的物理 MAC 地址，防止网关因全零 MAC 分配 12 分钟临时租约。
+- 处于校园 Wi-Fi 且外网中断时，程序核查网关 ARP 邻居状态；若网关持续无响应（如漫游至故障 AP），自动触发断开重连以促使 Windows 漫游至健康 AP。
+- 发送账号密码前重新核验外网，已经恢复就取消登录。跳转发现失败时，不再仅凭 `PORTAL_URL`、缓存或默认入口自动登录，继续探测并记录缺少认证证据。账号密码只发送到固定的已知服务器 `10.2.5.251:801`。
 - 认证接口的返回值只表示请求被接受；程序以实际 IPv4 外网探测作为恢复成功的最终判据。
 
 ## 开机常驻
@@ -45,8 +48,10 @@ Start-Process .\wenchang-campus-keeper.exe
 ## 构建
 
 ```powershell
-& 'D:\dev\envs\Go\bin\go.exe' test -buildvcs=false .
-& 'D:\dev\envs\Go\bin\go.exe' build -buildvcs=false -ldflags='-H=windowsgui' -o .\wenchang-campus-keeper.exe .
+go test -buildvcs=false .
+go build -buildvcs=false -ldflags="-H=windowsgui -s -w" -o .\wenchang-campus-keeper.exe .
 ```
+
+> **注意**：必须使用 `-ldflags="-H=windowsgui"` 参数将程序标记为 Windows GUI 子系统，否则双击运行时 Windows 会自动附带弹出黑色控制台终端窗口。
 
 Go 代码只依赖标准库。南湖请求根据原 `clogin.bat` 实现；该脚本不再参与运行。明天到南湖后需由用户现场验证实际认证跳转及登录结果，详见 [DESIGN.md](DESIGN.md)。

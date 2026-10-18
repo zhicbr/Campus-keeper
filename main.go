@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -25,31 +26,34 @@ const (
 )
 
 type controller struct {
-	cfg           config
-	portal        *portalClient
-	logger        *log.Logger
-	ui            *trayUI
-	quiet         bool
-	state         string
-	campus        campus
-	lastPortal    string
-	link          linkState
-	backoff       time.Duration
-	nextRetry     time.Time
-	retryTimer    *time.Timer
-	retryChannel  <-chan time.Time
-	wifiBackoff   time.Duration
-	nextWiFiTry   time.Time
-	wifiTimer     *time.Timer
-	wifiChannel   <-chan time.Time
-	nextReset     time.Time
-	lastStatusLog time.Time
+	cfg              config
+	portal           *portalClient
+	logger           *log.Logger
+	ui               *trayUI
+	quiet            bool
+	state            string
+	campus           campus
+	lastPortal       string
+	link             linkState
+	backoff          time.Duration
+	nextRetry        time.Time
+	retryTimer       *time.Timer
+	retryChannel     <-chan time.Time
+	wifiBackoff      time.Duration
+	nextWiFiTry      time.Time
+	wifiTimer        *time.Timer
+	wifiChannel      <-chan time.Time
+	nextReset        time.Time
+	lastStatusLog    time.Time
+	deadGatewayCount int
+	lastWiFiReset    time.Time
 }
 
 func main() {
 	quiet := flag.Bool("quiet", false, "only log changes and actions (for scheduled task)")
 	once := flag.Bool("once", false, "one check and one login attempt")
 	console := flag.Bool("console", false, "show terminal at startup")
+	diagnosticFlag := flag.Bool("diagnostic", false, "run detailed diagnostic recording")
 	flag.Parse()
 	exe, err := os.Executable()
 	if err != nil {
@@ -65,7 +69,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer writer.Close()
-	logger := log.New(writer, "", log.Ldate|log.Ltime)
+	logger := log.New(writer, "", log.Ldate|log.Ltime|log.Lmicroseconds)
 	if err := acquireSingleInstance(); err != nil {
 		logger.Fatal(err)
 	}
@@ -73,6 +77,15 @@ func main() {
 	defer stop()
 	ctx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
+	var diagnostic *diagnostics
+	if *diagnosticFlag || strings.Contains(strings.ToLower(filepath.Base(exe)), "diagnostic") {
+		var err error
+		diagnostic, err = startDiagnostics(ctx, dir, logger)
+		if err != nil {
+			logger.Fatal(err)
+		}
+		defer diagnostic.close()
+	}
 	ui, err := startTray(cancel, *console)
 	if err != nil {
 		logger.Fatal(err)
@@ -83,6 +96,7 @@ func main() {
 		ui: ui, quiet: *quiet, backoff: retryBase, retryTimer: time.NewTimer(time.Hour),
 		wifiBackoff: retryBase, wifiTimer: time.NewTimer(time.Hour),
 	}
+	c.portal.diagnostic = diagnostic
 	stopTimer(c.retryTimer)
 	stopTimer(c.wifiTimer)
 	c.nextReset = nextSix(time.Now())
@@ -106,7 +120,10 @@ func (c *controller) run(ctx context.Context) error {
 	}
 	linkChanges := make(chan linkState, 1)
 	monitorDone := make(chan struct{})
-	go func() { monitorLink(ctx, c.logger, networkEvents, linkChanges); close(monitorDone) }()
+	go func() {
+		monitorLink(ctx, c.logger, networkEvents, linkChanges, c.portal.diagnostic)
+		close(monitorDone)
+	}()
 	defer func() {
 		if closeNotifier != nil {
 			closeNotifier()
@@ -162,8 +179,20 @@ func (c *controller) run(ctx context.Context) error {
 }
 
 func (c *controller) cycle(ctx context.Context, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.portal.diagnostic != nil {
+		c.portal.diagnostic.log.Printf("cycle begin reason=%q link=%+v state=%q", reason, c.link, c.state)
+		defer func() {
+			c.portal.diagnostic.log.Printf("cycle end reason=%q link=%+v state=%q", reason, c.link, c.state)
+		}()
+	}
 	c.resetAtSixIfDue()
 	c.refreshLink()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !c.link.ready() {
 		return c.ensureWiFi()
 	}
@@ -175,7 +204,11 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
 	}
 	result := c.portal.probe(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if result.online {
+		c.deadGatewayCount = 0
 		c.detectCampusFromLink()
 		c.setState("online", "IPv4 外网已连通")
 		c.resetRetry()
@@ -196,7 +229,11 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		case <-time.After(2 * time.Second):
 		}
 		second := c.portal.probe(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if second.online {
+			c.deadGatewayCount = 0
 			c.detectCampusFromLink()
 			c.setState("online", "IPv4 外网已恢复")
 			c.resetRetry()
@@ -220,27 +257,50 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if !isCampusLink(c.link) {
 		return errors.New("当前接口没有校园网特征，等待网络恢复")
 	}
+	if c.link.kind == "wifi" && result.redirect == "" {
+		_, gwMac, gwErr := gatewayFingerprint(c.link.index)
+		if gwErr != nil || gwMac == "" {
+			c.deadGatewayCount++
+			if c.deadGatewayCount >= 2 && time.Since(c.lastWiFiReset) >= 60*time.Second {
+				c.logger.Printf("检测到 Wi-Fi 网关无响应（连续 %d 次无 ARP 邻居），执行断开重连以漫游至健康 AP", c.deadGatewayCount)
+				c.deadGatewayCount = 0
+				c.lastWiFiReset = time.Now()
+				c.setState("wifi-connecting", "Wi-Fi 网关失效，正在重新连接")
+				if err := reconnectSavedWiFi(studentWiFiProfile, c.portal.diagnostic); err != nil {
+					c.logger.Printf("Wi-Fi 重连失败：%v", err)
+				}
+				return errors.New("Wi-Fi 网关失效，已触发重连")
+			}
+		} else {
+			c.deadGatewayCount = 0
+		}
+	} else {
+		c.deadGatewayCount = 0
+	}
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		if !c.quiet {
 			c.logger.Printf("认证退避中，预计 %s 后重试", time.Until(c.nextRetry).Round(time.Second))
 		}
 		return errors.New("等待认证重试")
 	}
-	portal := c.lastPortal
-	if portal == "" {
-		found, discoverErr := c.portal.discover(ctx)
-		if discoverErr == nil {
-			portal = found
-		} else {
-			portal = c.cfg.portalURL
-			if portal == "" && (c.cfg.campusMode == campusWenchang || c.campus == campusWenchang) {
-				portal = "http://10.2.5.251/a79.htm"
-			}
-			if portal == "" && (c.cfg.campusMode == campusNanhu || c.campus == campusNanhu) {
-				portal = "http://10.2.5.251:801/eportal/"
-			}
+	decision, err := c.portal.prepareAuthentication(ctx, result)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.logger.Printf("暂停认证：%v；继续检查网络", err)
 		}
+		return err
 	}
+	c.refreshLink()
+	if !c.link.sameNetwork(probeLink) {
+		return errors.New("认证复核期间网络已切换，取消本轮认证")
+	}
+	if decision.online {
+		c.deadGatewayCount = 0
+		c.setState("online", "认证前复核发现外网已恢复，取消登录")
+		c.resetRetry()
+		return nil
+	}
+	portal := decision.redirect
 	site, err := chooseCampus(c.cfg.campusMode, portal, c.link, c.campus)
 	if err != nil {
 		c.scheduleRetry("不能选择认证流程：" + err.Error())
@@ -249,10 +309,6 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if c.campus != site {
 		c.logger.Printf("已选择%s校区认证流程", campusName(site))
 		c.campus = site
-	}
-	if _, portalErr := classifyPortal(portal); portalErr != nil {
-		c.logger.Printf("忽略未知认证跳转 %s；仅使用已知校园网服务器", safePortal(portal))
-		portal = ""
 	}
 	if portal != "" {
 		c.lastPortal = portal
@@ -266,8 +322,17 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		c.setState("link-down", "认证前校园网接口断开："+c.link.describe())
 		return errors.New("校园网接口未就绪")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.portal.diagnostic != nil {
+		c.portal.diagnostic.trigger("before-login")
+	}
 	c.logger.Printf("尝试%s校园网认证：%s", campusName(site), safePortal(portal))
-	if err := c.portal.login(ctx, site, portal, c.link.ipv4); err != nil {
+	if err := c.portal.login(ctx, site, portal, c.link.ipv4, c.link.mac); err != nil {
+		if cancelled := ctx.Err(); cancelled != nil {
+			return cancelled
+		}
 		c.scheduleRetry("认证接口未确认成功：" + err.Error())
 		return err
 	}
@@ -279,6 +344,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		case <-time.After(3 * time.Second):
 		}
 		if c.portal.probe(ctx).online {
+			c.deadGatewayCount = 0
 			c.setState("online", "登录后确认 IPv4 外网已恢复")
 			c.resetRetry()
 			return nil
@@ -298,6 +364,9 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 
 func (c *controller) setState(next, message string) {
 	if c.state != next {
+		if c.portal != nil && c.portal.diagnostic != nil {
+			c.portal.diagnostic.trigger("state-change:" + next)
+		}
 		c.logger.Printf("状态变化：%s → %s；%s", stateName(c.state), stateName(next), message)
 	}
 	c.state = next
@@ -357,7 +426,14 @@ func (c *controller) ensureWiFi() error {
 	if !c.nextWiFiTry.IsZero() && time.Now().Before(c.nextWiFiTry) {
 		return errors.New("等待 Wi-Fi 连接或重试")
 	}
-	status, err := requestSavedWiFi(studentWiFiProfile)
+	if c.portal.diagnostic != nil {
+		c.portal.diagnostic.log.Printf("wifi action begin profile=%q link=%+v", studentWiFiProfile, c.link)
+		c.portal.diagnostic.trigger("before-wifi-check")
+	}
+	status, err := requestSavedWiFi(studentWiFiProfile, c.portal.diagnostic)
+	if c.portal.diagnostic != nil {
+		c.portal.diagnostic.log.Printf("wifi action end status=%q error=%q", status, diagnosticError(err))
+	}
 	if err != nil {
 		c.setState("link-down", fmt.Sprintf("有线网不可用；Wi-Fi %s 未接入：%v", studentWiFiProfile, err))
 		c.scheduleWiFiRetry(true)

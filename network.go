@@ -16,6 +16,7 @@ type linkState struct {
 	ssid  string
 	up    bool
 	ipv4  string
+	mac   string
 }
 
 func (s linkState) ready() bool { return s.index != 0 && s.up && s.ipv4 != "" }
@@ -37,11 +38,14 @@ func (s linkState) describe() string {
 }
 
 func (s linkState) sameNetwork(other linkState) bool {
-	return s.index == other.index && s.kind == other.kind && s.ssid == other.ssid && s.up == other.up && s.ipv4 == other.ipv4
+	return s.index == other.index && s.kind == other.kind && s.ssid == other.ssid && s.up == other.up && s.ipv4 == other.ipv4 && s.mac == other.mac
 }
 
 func (c *controller) refreshLink() bool {
 	next := readLink(c.link)
+	if c.portal != nil && c.portal.diagnostic != nil {
+		c.portal.diagnostic.log.Printf("controller raw link previous=%+v next=%+v", c.link, next)
+	}
 	return c.adoptLink(next)
 }
 
@@ -64,7 +68,7 @@ func (c *controller) adoptLink(next linkState) bool {
 
 // monitorLink runs independently of HTTP login requests. Windows change
 // notifications are the fast path; a five-second snapshot is the fallback.
-func monitorLink(ctx context.Context, logger *log.Logger, notifications <-chan struct{}, changes chan linkState) {
+func monitorLink(ctx context.Context, logger *log.Logger, notifications <-chan struct{}, changes chan linkState, diagnostic *diagnostics) {
 	ticker := time.NewTicker(linkInterval)
 	defer ticker.Stop()
 	settleTimer := time.NewTimer(time.Hour)
@@ -75,6 +79,9 @@ func monitorLink(ctx context.Context, logger *log.Logger, notifications <-chan s
 	var pendingUntil time.Time
 	check := func() {
 		next := readLink(previous)
+		if diagnostic != nil {
+			diagnostic.log.Printf("monitor raw sample previous=%+v next=%+v pending=%s", previous, next, pendingUntil)
+		}
 		// Interface enumeration and DHCP can briefly disappear during WLAN
 		// roaming. Wait two seconds before reporting a loss or reconnecting.
 		if initialized && previous.ready() && !next.ready() {
@@ -202,7 +209,7 @@ func adapterKind(name string) string {
 }
 
 func snapshotInterface(iface net.Interface) linkState {
-	s := linkState{index: iface.Index, name: iface.Name, kind: adapterKind(iface.Name), up: iface.Flags&net.FlagUp != 0}
+	s := linkState{index: iface.Index, name: iface.Name, kind: adapterKind(iface.Name), up: iface.Flags&net.FlagUp != 0, mac: formatMAC(iface.HardwareAddr)}
 	addrs, err := iface.Addrs()
 	if err != nil {
 		return s
@@ -218,4 +225,12 @@ func snapshotInterface(iface net.Interface) linkState {
 		}
 	}
 	return s
+}
+
+func formatMAC(hw net.HardwareAddr) string {
+	s := strings.NewReplacer("-", "", ":", "").Replace(hw.String())
+	if len(s) == 12 {
+		return strings.ToUpper(s)
+	}
+	return ""
 }
