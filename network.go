@@ -49,15 +49,15 @@ func (s linkState) networkSummary(site campus) string {
 			name = "文昌"
 		}
 		if s.kind == "wifi" {
-			return name + " (CUMT_Stu)"
+			return name + " (Wi-Fi)"
 		}
 		return name + " (有线)"
 	}
 	if s.kind == "wifi" {
 		if s.ssid != "" {
-			return fmt.Sprintf("无线 (%s)", s.ssid)
+			return fmt.Sprintf("Wi-Fi (%s)", s.ssid)
 		}
-		return "无线"
+		return "Wi-Fi"
 	}
 	return "有线"
 }

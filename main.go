@@ -150,9 +150,6 @@ func main() {
 	c.ui = ui
 	c.syncUI()
 
-	if !cfg.valid() {
-		ui.openSettings()
-	}
 
 	logger.Printf("CampusKeeper 启动；账号 %s；运营商 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), cfg.operatorName(), healthInterval, linkInterval)
 	if *once {
@@ -315,9 +312,6 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return errors.New("当前接口没有校园网特征，等待网络恢复")
 	}
 	if !c.cfg.valid() {
-		if c.ui != nil {
-			c.ui.openSettings()
-		}
 		return errors.New("未配置登录账号或密码")
 	}
 	if c.link.kind == "wifi" && result.redirect == "" {

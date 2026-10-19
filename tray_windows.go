@@ -35,6 +35,9 @@ const (
 	wmRButtonUp     = 0x0205
 	wmLButtonDblClk = 0x0203
 	wmContextMenu   = 0x007B
+	wmSetIcon       = 0x0080
+	iconSmall       = 0
+	iconBig         = 1
 
 	mfString    = 0x00000000
 	mfGrayed    = 0x00000001
@@ -68,8 +71,7 @@ var (
 	shellNotifyIcon       = shell32.NewProc("Shell_NotifyIconW")
 	getModuleHandle       = kernel32.NewProc("GetModuleHandleW")
 	shellExecute          = shell32.NewProc("ShellExecuteW")
-	openDesktop           = user32.NewProc("OpenDesktopW")
-	setThreadDesktop      = user32.NewProc("SetThreadDesktop")
+	setWindowPos          = user32.NewProc("SetWindowPos")
 	setWindowLongPtr      = user32.NewProc("SetWindowLongPtrW")
 	setWindowLong         = user32.NewProc("SetWindowLongW")
 	callWindowProc        = user32.NewProc("CallWindowProcW")
@@ -79,6 +81,9 @@ var (
 	dispatchMessage       = user32.NewProc("DispatchMessageW")
 	postMessage           = user32.NewProc("PostMessageW")
 	postQuitMessage       = user32.NewProc("PostQuitMessage")
+	sendMessage           = user32.NewProc("SendMessageW")
+	loadImage             = user32.NewProc("LoadImageW")
+	getSystemMetrics      = user32.NewProc("GetSystemMetrics")
 )
 
 type winPoint struct{ x, y int32 }
@@ -137,11 +142,15 @@ type dashboardInfo struct {
 
 type trayUI struct {
 	mu            sync.Mutex
+	wvOnce        sync.Once
+	wvReady       chan struct{}
 	hwndTray      uintptr
 	hwndWebview   uintptr
 	oldWndProc    uintptr
 	wv            webview2.WebView
 	windowVisible bool
+	uiRendered    bool
+	pendingTab    string
 	dash          dashboardInfo
 	logText       string
 	currentIcon   uintptr
@@ -151,6 +160,31 @@ type trayUI struct {
 	getConfig    func() config
 	onSaveConfig func(config)
 	done         chan struct{}
+}
+
+func (t *trayUI) setWindowIcons(hwnd uintptr) {
+	if hwnd == 0 {
+		return
+	}
+	instance, _, _ := getModuleHandle.Call(0)
+	if loadImage.Find() == nil && getSystemMetrics.Find() == nil {
+		icow, _, _ := getSystemMetrics.Call(11) // SM_CXICON
+		icoh, _, _ := getSystemMetrics.Call(12) // SM_CYICON
+		hIconBig, _, _ := loadImage.Call(instance, 1, 1 /* IMAGE_ICON */, icow, icoh, 0)
+		if hIconBig != 0 {
+			sendMessage.Call(hwnd, wmSetIcon, iconBig, hIconBig)
+		}
+
+		smw, _, _ := getSystemMetrics.Call(49) // SM_CXSMICON
+		smh, _, _ := getSystemMetrics.Call(50) // SM_CYSMICON
+		hIconSm, _, _ := loadImage.Call(instance, 1, 1 /* IMAGE_ICON */, smw, smh, 0)
+		if hIconSm != 0 {
+			sendMessage.Call(hwnd, wmSetIcon, iconSmall, hIconSm)
+		}
+	}
+	if t.currentIcon != 0 {
+		sendMessage.Call(hwnd, wmSetIcon, iconSmall, t.currentIcon)
+	}
 }
 
 func initDpiAwareness() {
@@ -208,11 +242,8 @@ func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveC
 		return nil, err
 	}
 
-	wvReady := make(chan error, 1)
-	go t.webviewLoop(wvReady, showConsole)
-	if err := <-wvReady; err != nil {
-		// Webview failed to initialize, but tray still works
-		_ = err
+	if showConsole {
+		go t.ensureWebview("logs")
 	}
 
 	setConsoleWriter(t)
@@ -224,18 +255,14 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 	defer runtime.UnlockOSThread()
 	defer close(t.done)
 
-	if hDesk, _, _ := openDesktop.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Default"))), 0, 0, 0x10000000); hDesk != 0 {
-		setThreadDesktop.Call(hDesk)
-	}
-
 	instance, _, _ := getModuleHandle.Call(0)
 	trayClassName := syscall.StringToUTF16Ptr("WenchangCampusKeeperTray")
 
-	trayCallback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
-		switch message {
+	trayCallback := syscall.NewCallback(func(hwnd, message, wparam, lparam uintptr) uintptr {
+		switch uint32(message) {
 		case trayMessage:
 			switch uint16(lparam) {
-			case wmRButtonUp, wmRButtonDown, wmContextMenu:
+			case wmRButtonUp:
 				t.popupMenu()
 			case wmLButtonDblClk:
 				t.toggleWindow()
@@ -258,7 +285,7 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 			postQuitMessage.Call(0)
 			return 0
 		}
-		res, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
+		res, _, _ := defWindowProc.Call(hwnd, message, wparam, lparam)
 		return res
 	})
 
@@ -310,12 +337,12 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 	}
 }
 
-func (t *trayUI) webviewLoop(ready chan<- error, initialShow bool) {
+func (t *trayUI) webviewLoop(ready chan struct{}) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	if _, err := webviewloader.GetInstalledVersion(); err != nil {
-		ready <- err
+		close(ready)
 		return
 	}
 
@@ -327,37 +354,45 @@ func (t *trayUI) webviewLoop(ready chan<- error, initialShow bool) {
 		DataPath: wvDataDir,
 		WindowOptions: webview2.WindowOptions{
 			Title:  "CampusKeeper",
-			Width:  520,
-			Height: 640,
+			Width:  680,
+			Height: 560,
 			Center: true,
+			IconId: 1,
 		},
 	})
 	if wv == nil {
-		ready <- errors.New("无法创建 WebView2 窗口")
+		close(ready)
 		return
 	}
 
 	hwndWebview := uintptr(wv.Window())
+	// Hide immediately to prevent unrendered blank frame
+	showWindow.Call(hwndWebview, 0) // SW_HIDE
+
 	t.mu.Lock()
 	t.wv = wv
 	t.hwndWebview = hwndWebview
 	t.mu.Unlock()
 
-	// Subclass to intercept WM_CLOSE -> hide window instead of destroy
+	t.setWindowIcons(hwndWebview)
+	applyModernWindowAttributes(hwndWebview)
+	wv.SetSize(680, 560, webview2.HintNone)
+	wv.SetSize(520, 420, webview2.HintMin)
+
+	// Intercept WM_CLOSE so clicking 'X' hides the window instead of destroying WebView2
 	var oldWndProc uintptr
-	subclassCallback := syscall.NewCallback(func(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
-		if msg == wmClose {
+	subclassCallback := syscall.NewCallback(func(hwnd, msg, wp, lp uintptr) uintptr {
+		if uint32(msg) == wmClose {
 			t.hideWindow()
 			return 0
 		}
-		res, _, _ := callWindowProc.Call(oldWndProc, hwnd, uintptr(msg), wp, lp)
+		res, _, _ := callWindowProc.Call(oldWndProc, hwnd, msg, wp, lp)
 		return res
 	})
 	oldWndProc = setWndProc(hwndWebview, subclassCallback)
+	t.mu.Lock()
 	t.oldWndProc = oldWndProc
-
-	applyModernWindowAttributes(hwndWebview)
-	wv.SetSize(460, 500, webview2.HintMin)
+	t.mu.Unlock()
 
 	// Bind Go RPC methods
 	wv.Bind("saveConfig", func(account, password, opStr string) (bool, error) {
@@ -441,65 +476,93 @@ func (t *trayUI) webviewLoop(ready chan<- error, initialShow bool) {
 		return true, nil
 	})
 
+	wv.Bind("onUIRendered", func() (bool, error) {
+		t.mu.Lock()
+		t.uiRendered = true
+		visible := t.windowVisible
+		hwnd := t.hwndWebview
+		tab := t.pendingTab
+		t.mu.Unlock()
+
+		if tab != "" {
+			wv.Dispatch(func() {
+				wv.Eval(fmt.Sprintf("if (window.switchTab) window.switchTab('%s');", tab))
+			})
+		}
+		if visible && hwnd != 0 {
+			showWindow.Call(hwnd, 5) // SW_SHOW
+			setForegroundWindow.Call(hwnd)
+		}
+		return true, nil
+	})
+
 	wv.SetHtml(appHTML)
-
-	if initialShow {
-		t.windowVisible = true
-		showWindow.Call(hwndWebview, 5) // SW_SHOW
-		setForegroundWindow.Call(hwndWebview)
-	} else {
-		t.windowVisible = false
-		showWindow.Call(hwndWebview, 0) // SW_HIDE
-	}
-
-	ready <- nil
+	close(ready)
 
 	// WebView2 dedicated message loop
 	wv.Run()
+
+	t.mu.Lock()
+	t.wv = nil
+	t.hwndWebview = 0
+	t.windowVisible = false
+	t.uiRendered = false
+	t.wvReady = nil
+	t.wvOnce = sync.Once{}
+	t.mu.Unlock()
+}
+
+func (t *trayUI) ensureWebview(targetTab string) {
+	t.wvOnce.Do(func() {
+		t.wvReady = make(chan struct{})
+		go t.webviewLoop(t.wvReady)
+	})
+	if t.wvReady != nil {
+		<-t.wvReady
+	}
+	t.showWindowWithTab(targetTab)
 }
 
 func (t *trayUI) showWindowWithTab(tab string) {
 	t.mu.Lock()
 	wv := t.wv
 	hwnd := t.hwndWebview
+	rendered := t.uiRendered
+	t.windowVisible = true
+	t.pendingTab = tab
 	t.mu.Unlock()
+
 	if wv == nil || hwnd == 0 {
 		return
 	}
 	wv.Dispatch(func() {
-		wv.Eval(fmt.Sprintf("if (window.switchTab) window.switchTab('%s');", tab))
-		showWindow.Call(hwnd, 5) // SW_SHOW
-		setForegroundWindow.Call(hwnd)
-		t.mu.Lock()
-		t.windowVisible = true
-		t.mu.Unlock()
+		wv.Eval(fmt.Sprintf("if (window.switchTab) window.switchTab('%s'); if (window.refreshAll) window.refreshAll();", tab))
+		if rendered {
+			showWindow.Call(hwnd, 5) // SW_SHOW
+			setForegroundWindow.Call(hwnd)
+		}
 	})
 }
 
 func (t *trayUI) hideWindow() {
 	t.mu.Lock()
-	wv := t.wv
 	hwnd := t.hwndWebview
+	t.windowVisible = false
 	t.mu.Unlock()
-	if wv == nil || hwnd == 0 {
-		return
-	}
-	wv.Dispatch(func() {
+	if hwnd != 0 {
 		showWindow.Call(hwnd, 0) // SW_HIDE
-		t.mu.Lock()
-		t.windowVisible = false
-		t.mu.Unlock()
-	})
+	}
 }
 
 func (t *trayUI) toggleWindow() {
 	t.mu.Lock()
-	visible := t.windowVisible
 	wv := t.wv
 	hwnd := t.hwndWebview
+	visible := t.windowVisible
 	t.mu.Unlock()
 
 	if wv == nil || hwnd == 0 {
+		go t.ensureWebview("settings")
 		return
 	}
 	if visible {
@@ -510,11 +573,25 @@ func (t *trayUI) toggleWindow() {
 }
 
 func (t *trayUI) openSettings() {
-	t.showWindowWithTab("settings")
+	t.mu.Lock()
+	wv := t.wv
+	t.mu.Unlock()
+	if wv == nil {
+		go t.ensureWebview("settings")
+	} else {
+		t.showWindowWithTab("settings")
+	}
 }
 
 func (t *trayUI) showConsole() {
-	t.showWindowWithTab("logs")
+	t.mu.Lock()
+	wv := t.wv
+	t.mu.Unlock()
+	if wv == nil {
+		go t.ensureWebview("logs")
+	} else {
+		t.showWindowWithTab("logs")
+	}
 }
 
 func (t *trayUI) updateDashboard(status, network, operator, ip string, isCampus bool) {
@@ -590,6 +667,12 @@ func (t *trayUI) updateIcon(action uint32) bool {
 	if oldIcon != 0 {
 		destroyIcon.Call(oldIcon)
 	}
+	t.mu.Lock()
+	hwndWebview := t.hwndWebview
+	t.mu.Unlock()
+	if hwndWebview != 0 && newIcon != 0 {
+		sendMessage.Call(hwndWebview, wmSetIcon, iconSmall, newIcon)
+	}
 	return res != 0
 }
 
@@ -609,18 +692,14 @@ func (t *trayUI) popupMenu() {
 		return
 	}
 
-	// 1. Header (disabled)
-	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("CampusKeeper"))))
-	appendMenu.Call(menu, mfSeparator, 0, 0)
-
-	// 2. Minimalist Dashboard
-	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.status))))
-	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("网络："+dash.network))))
-	if dash.operator != "" {
-		appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商："+dash.operator))))
+	// 1. Dashboard Status (High contrast, clickable)
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.status))))
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("网络："+dash.network))))
+	if dash.isCampus && dash.operator != "" {
+		appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商："+dash.operator))))
 	}
 	if dash.ip != "" {
-		appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("地址："+dash.ip))))
+		appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("地址："+dash.ip))))
 	}
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 
@@ -687,11 +766,16 @@ func (t *trayUI) close() {
 	t.mu.Lock()
 	hwndTray := t.hwndTray
 	wv := t.wv
+	hwndWebview := t.hwndWebview
+	oldWndProc := t.oldWndProc
 	t.mu.Unlock()
 
+	if hwndWebview != 0 && oldWndProc != 0 {
+		setWndProc(hwndWebview, oldWndProc)
+	}
 	if wv != nil {
 		wv.Dispatch(func() {
-			wv.Terminate()
+			wv.Destroy()
 		})
 	}
 	if hwndTray != 0 {
