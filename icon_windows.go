@@ -212,7 +212,18 @@ func createShieldIcon(kind iconKind) uintptr {
 
 	copy(unsafe.Slice((*uint32)(bits), w*h), pixels)
 
-	hMask, _, _ := createBitmap.Call(w, h, 1, 1, 0)
+	maskBits := make([]byte, 32)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if (pixels[y*w+x] >> 24) == 0 {
+				byteIdx := y*2 + x/8
+				bitIdx := 7 - (x % 8)
+				maskBits[byteIdx] |= (1 << bitIdx)
+			}
+		}
+	}
+
+	hMask, _, _ := createBitmap.Call(w, h, 1, 1, uintptr(unsafe.Pointer(&maskBits[0])))
 	if hMask == 0 {
 		return 0
 	}

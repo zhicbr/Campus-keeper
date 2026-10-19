@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -95,6 +96,8 @@ var (
 	getWindowTextLength = user32.NewProc("GetWindowTextLengthW")
 	messageBox          = user32.NewProc("MessageBoxW")
 	shellExecute        = shell32.NewProc("ShellExecuteW")
+	openDesktop         = user32.NewProc("OpenDesktopW")
+	setThreadDesktop    = user32.NewProc("SetThreadDesktop")
 )
 
 type winPoint struct{ x, y int32 }
@@ -215,6 +218,11 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(t.done)
+
+	// Attach this GUI thread to the interactive user desktop if needed
+	if hDesk, _, _ := openDesktop.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Default"))), 0, 0, 0x10000000); hDesk != 0 {
+		setThreadDesktop.Call(hDesk)
+	}
 
 	instance, _, _ := getModuleHandle.Call(0)
 	className := syscall.StringToUTF16Ptr("WenchangCampusKeeperTray")
@@ -395,6 +403,15 @@ func (t *trayUI) updateIcon(action uintptr) bool {
 	}
 	copy(data.tip[:], syscall.StringToUTF16("CampusKeeper"))
 	result, _, _ := shellNotifyIcon.Call(action, uintptr(unsafe.Pointer(&data)))
+	if result == 0 && action == nimAdd {
+		for i := 0; i < 5; i++ {
+			time.Sleep(200 * time.Millisecond)
+			result, _, _ = shellNotifyIcon.Call(action, uintptr(unsafe.Pointer(&data)))
+			if result != 0 {
+				break
+			}
+		}
+	}
 
 	t.mu.Lock()
 	if t.currentIcon != 0 {
