@@ -37,6 +37,31 @@ func (s linkState) describe() string {
 	return fmt.Sprintf("%s 已连接，IPv4 %s", s.name, s.ipv4)
 }
 
+func (s linkState) networkSummary(site campus) string {
+	if !s.ready() {
+		return "未连接"
+	}
+	if isCampusLink(s) {
+		name := "校园网"
+		if site == campusNanhu {
+			name = "南湖"
+		} else if site == campusWenchang {
+			name = "文昌"
+		}
+		if s.kind == "wifi" {
+			return name + " (CUMT_Stu)"
+		}
+		return name + " (有线)"
+	}
+	if s.kind == "wifi" {
+		if s.ssid != "" {
+			return fmt.Sprintf("无线 (%s)", s.ssid)
+		}
+		return "无线"
+	}
+	return "有线"
+}
+
 func (s linkState) sameNetwork(other linkState) bool {
 	return s.index == other.index && s.kind == other.kind && s.ssid == other.ssid && s.up == other.up && s.ipv4 == other.ipv4 && s.mac == other.mac
 }
@@ -59,10 +84,11 @@ func (c *controller) adoptLink(next linkState) bool {
 		c.campus = ""
 		c.resetRetry()
 		if hadContext && c.logger != nil {
-			c.logger.Print("网络已切换；清除校区、认证入口及重试缓存")
+			c.logger.Print("网络已切换；清除认证及重试缓存")
 		}
 	}
 	c.link = next
+	c.syncUI()
 	return true
 }
 

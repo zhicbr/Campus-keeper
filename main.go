@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -26,6 +27,7 @@ const (
 )
 
 type controller struct {
+	mu               sync.Mutex
 	cfg              config
 	portal           *portalClient
 	logger           *log.Logger
@@ -47,6 +49,7 @@ type controller struct {
 	lastStatusLog    time.Time
 	deadGatewayCount int
 	lastWiFiReset    time.Time
+	reconnectTrigger chan struct{}
 }
 
 func main() {
@@ -55,52 +58,103 @@ func main() {
 	console := flag.Bool("console", false, "show terminal at startup")
 	diagnosticFlag := flag.Bool("diagnostic", false, "run detailed diagnostic recording")
 	flag.Parse()
-	exe, err := os.Executable()
-	if err != nil {
-		log.Fatal(err)
-	}
-	dir := filepath.Dir(exe)
-	cfg, err := loadConfig(filepath.Join(dir, ".env"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	writer, err := newRotatingLog(filepath.Join(dir, "keeper.log"), 5<<20)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer writer.Close()
-	logger := log.New(writer, "", log.Ldate|log.Ltime|log.Lmicroseconds)
+
 	if err := acquireSingleInstance(); err != nil {
-		logger.Fatal(err)
+		wakeExistingInstance()
+		return
 	}
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
+
+	logFile := logPath()
+	writer, err := newRotatingLog(logFile, 5<<20)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer writer.Close()
+	logger := log.New(writer, "", log.Ldate|log.Ltime|log.Lmicroseconds)
+
+	cfg, cfgErr := loadEncryptedConfig()
+	if cfgErr != nil {
+		logger.Printf("未检测到登录配置，等待在设置面板填写：%v", cfgErr)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		logger.Fatal(err)
+	}
+
 	var diagnostic *diagnostics
 	if *diagnosticFlag || strings.Contains(strings.ToLower(filepath.Base(exe)), "diagnostic") {
 		var err error
-		diagnostic, err = startDiagnostics(ctx, dir, logger)
+		diagnostic, err = startDiagnostics(ctx, appDataDir(), logger)
 		if err != nil {
 			logger.Fatal(err)
 		}
 		defer diagnostic.close()
 	}
-	ui, err := startTray(cancel, *console)
-	if err != nil {
-		logger.Fatal(err)
-	}
-	defer ui.close()
+
 	c := &controller{
-		cfg: cfg, portal: newPortalClient(cfg), logger: logger,
-		ui: ui, quiet: *quiet, backoff: retryBase, retryTimer: time.NewTimer(time.Hour),
-		wifiBackoff: retryBase, wifiTimer: time.NewTimer(time.Hour),
+		cfg:              cfg,
+		portal:           newPortalClient(cfg),
+		logger:           logger,
+		quiet:            *quiet,
+		backoff:          retryBase,
+		retryTimer:       time.NewTimer(time.Hour),
+		wifiBackoff:      retryBase,
+		wifiTimer:        time.NewTimer(time.Hour),
+		reconnectTrigger: make(chan struct{}, 1),
 	}
 	c.portal.diagnostic = diagnostic
 	stopTimer(c.retryTimer)
 	stopTimer(c.wifiTimer)
 	c.nextReset = nextSix(time.Now())
-	logger.Printf("校园网守护程序启动；账号 %s；校区模式 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), cfg.campusMode, healthInterval, linkInterval)
+
+	ui, err := startTray(
+		cancel,
+		func() {
+			select {
+			case c.reconnectTrigger <- struct{}{}:
+			default:
+			}
+		},
+		func() config {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.cfg
+		},
+		func(newCfg config) {
+			c.mu.Lock()
+			c.cfg = newCfg
+			c.portal.cfg = newCfg
+			c.mu.Unlock()
+			if err := saveEncryptedConfig(newCfg); err != nil {
+				c.logger.Printf("保存登录配置失败：%v", err)
+			} else {
+				c.logger.Printf("登录配置已更新；账号 %s；运营商 %s", mask(newCfg.account), newCfg.operatorName())
+			}
+			c.syncUI()
+			select {
+			case c.reconnectTrigger <- struct{}{}:
+			default:
+			}
+		},
+		*console,
+	)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	defer ui.close()
+	c.ui = ui
+	c.syncUI()
+
+	if !cfg.valid() {
+		ui.openSettings()
+	}
+
+	logger.Printf("CampusKeeper 启动；账号 %s；运营商 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", mask(cfg.account), cfg.operatorName(), healthInterval, linkInterval)
 	if *once {
 		if err := c.cycle(ctx, "手动单次检测"); err != nil {
 			logger.Printf("本次检查未恢复：%v", err)
@@ -144,6 +198,9 @@ func (c *controller) run(ctx context.Context) error {
 		case <-ctx.Done():
 			c.logger.Print("收到停止信号，守护程序退出")
 			return ctx.Err()
+		case <-c.reconnectTrigger:
+			c.logger.Print("收到重新连接请求，正在核查网络")
+			_ = c.cycle(ctx, "手动重连")
 		case link := <-linkChanges:
 			if link != c.link {
 				c.adoptLink(link)
@@ -201,7 +258,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.detectCampusFromLink()
 	probeLink := c.link
 	if !c.quiet && (reason != "定期外网检查" || c.state != "online") {
-		c.logger.Printf("%s：正在检测 IPv4 外网", reason)
+		c.logger.Printf("%s：正在检测 IPv4 网络", reason)
 	}
 	result := c.portal.probe(ctx)
 	if err := ctx.Err(); err != nil {
@@ -210,7 +267,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if result.online {
 		c.deadGatewayCount = 0
 		c.detectCampusFromLink()
-		c.setState("online", "IPv4 外网已连通")
+		c.setState("online", "已连通")
 		c.resetRetry()
 		return nil
 	}
@@ -221,7 +278,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	// are already a definitive sign of unauthenticated IPv4 access.
 	if result.redirect == "" {
 		if !c.quiet {
-			c.logger.Printf("外网探测异常，2 秒后复核：%s", result.reason)
+			c.logger.Printf("网络探测异常，2 秒后复核：%s", result.reason)
 		}
 		select {
 		case <-ctx.Done():
@@ -235,7 +292,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		if second.online {
 			c.deadGatewayCount = 0
 			c.detectCampusFromLink()
-			c.setState("online", "IPv4 外网已恢复")
+			c.setState("online", "已恢复")
 			c.resetRetry()
 			return nil
 		}
@@ -246,16 +303,22 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	c.refreshLink()
 	if !c.link.sameNetwork(probeLink) {
-		return errors.New("外网检测期间网络已切换，等待重新识别校区")
+		return errors.New("网络检测期间网络已切换，等待重新识别")
 	}
 	if !c.link.ready() {
-		c.setState("link-down", "校园网接口未就绪："+c.link.describe())
-		return errors.New("校园网接口未就绪")
+		c.setState("link-down", "接口未就绪："+c.link.describe())
+		return errors.New("接口未就绪")
 	}
 	c.detectCampusFromLink()
-	c.setState("offline", "IPv4 外网中断："+result.reason)
+	c.setState("offline", "网络中断："+result.reason)
 	if !isCampusLink(c.link) {
 		return errors.New("当前接口没有校园网特征，等待网络恢复")
+	}
+	if !c.cfg.valid() {
+		if c.ui != nil {
+			c.ui.openSettings()
+		}
+		return errors.New("未配置登录账号或密码")
 	}
 	if c.link.kind == "wifi" && result.redirect == "" {
 		_, gwMac, gwErr := gatewayFingerprint(c.link.index)
@@ -296,7 +359,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	if decision.online {
 		c.deadGatewayCount = 0
-		c.setState("online", "认证前复核发现外网已恢复，取消登录")
+		c.setState("online", "已恢复，取消登录")
 		c.resetRetry()
 		return nil
 	}
@@ -307,7 +370,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return err
 	}
 	if c.campus != site {
-		c.logger.Printf("已选择%s校区认证流程", campusName(site))
+		c.logger.Printf("已选择%s认证流程", campusName(site))
 		c.campus = site
 	}
 	if portal != "" {
@@ -316,11 +379,11 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	chosenLink := c.link
 	c.refreshLink()
 	if !c.link.sameNetwork(chosenLink) {
-		return errors.New("认证前网络已切换，等待重新识别校区")
+		return errors.New("认证前网络已切换，等待重新识别")
 	}
 	if !c.link.ready() {
-		c.setState("link-down", "认证前校园网接口断开："+c.link.describe())
-		return errors.New("校园网接口未就绪")
+		c.setState("link-down", "认证前接口断开："+c.link.describe())
+		return errors.New("接口未就绪")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -328,7 +391,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if c.portal.diagnostic != nil {
 		c.portal.diagnostic.trigger("before-login")
 	}
-	c.logger.Printf("尝试%s校园网认证：%s", campusName(site), safePortal(portal))
+	c.logger.Printf("尝试%s认证：%s", campusName(site), safePortal(portal))
 	if err := c.portal.login(ctx, site, portal, c.link.ipv4, c.link.mac); err != nil {
 		if cancelled := ctx.Err(); cancelled != nil {
 			return cancelled
@@ -336,7 +399,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		c.scheduleRetry("认证接口未确认成功：" + err.Error())
 		return err
 	}
-	c.logger.Print("认证接口已响应，正在核验 IPv4 外网")
+	c.logger.Print("认证接口已响应，正在核验网络")
 	for i := 0; i < 5; i++ {
 		select {
 		case <-ctx.Done():
@@ -345,7 +408,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		}
 		if c.portal.probe(ctx).online {
 			c.deadGatewayCount = 0
-			c.setState("online", "登录后确认 IPv4 外网已恢复")
+			c.setState("online", "已连通")
 			c.resetRetry()
 			return nil
 		}
@@ -354,12 +417,12 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 			return errors.New("认证核验期间网络已切换")
 		}
 		if !c.link.ready() {
-			c.setState("link-down", "认证核验期间校园网接口断开："+c.link.describe())
-			return errors.New("校园网接口未就绪")
+			c.setState("link-down", "认证核验期间接口断开："+c.link.describe())
+			return errors.New("接口未就绪")
 		}
 	}
-	c.scheduleRetry("认证后 15 秒仍无法访问 IPv4 外网")
-	return errors.New("认证未使外网恢复")
+	c.scheduleRetry("认证后 15 秒仍无法访问外网")
+	return errors.New("认证未使网络恢复")
 }
 
 func (c *controller) setState(next, message string) {
@@ -370,9 +433,22 @@ func (c *controller) setState(next, message string) {
 		c.logger.Printf("状态变化：%s → %s；%s", stateName(c.state), stateName(next), message)
 	}
 	c.state = next
-	if c.ui != nil {
-		c.ui.setStatus(stateName(next))
+	c.syncUI()
+}
+
+func (c *controller) syncUI() {
+	if c.ui == nil {
+		return
 	}
+	c.mu.Lock()
+	st := stateName(c.state)
+	netSummary := c.link.networkSummary(c.campus)
+	opName := c.cfg.operatorName()
+	ipv4 := c.link.ipv4
+	isCampus := isCampusLink(c.link)
+	c.mu.Unlock()
+
+	c.ui.updateDashboard(st, netSummary, opName, ipv4, isCampus)
 }
 
 func (c *controller) status() string {
@@ -380,7 +456,7 @@ func (c *controller) status() string {
 	if site == "" && c.cfg.campusMode != campusAuto {
 		site = c.cfg.campusMode
 	}
-	s := campusName(site) + "；" + stateName(c.state) + "；" + c.link.describe()
+	s := c.link.networkSummary(site) + "；" + stateName(c.state)
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		s += "；下次认证约 " + time.Until(c.nextRetry).Round(time.Second).String() + " 后"
 	}
@@ -393,17 +469,15 @@ func (c *controller) status() string {
 func stateName(s string) string {
 	switch s {
 	case "online":
-		return "外网正常"
-	case "offline":
-		return "外网中断"
-	case "link-down":
-		return "校园网接口未就绪"
+		return "已连接"
+	case "offline", "link-down":
+		return "未连接"
 	case "wifi-connecting":
-		return "正在连接 Wi-Fi"
+		return "连接中"
 	case "wifi-wait-ip":
-		return "Wi-Fi 已连接，等待 IPv4"
+		return "获取地址中"
 	default:
-		return "待检查"
+		return "检测中"
 	}
 }
 

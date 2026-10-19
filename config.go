@@ -1,70 +1,92 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
+
+type operator string
+
+const (
+	operatorCMCC    operator = "cmcc"
+	operatorTelecom operator = "telecom"
+	operatorUnicom  operator = "unicom"
+	operatorCampus  operator = "campus"
+)
+
+func (op operator) displayName() string {
+	switch op {
+	case operatorCMCC:
+		return "移动"
+	case operatorTelecom:
+		return "电信"
+	case operatorUnicom:
+		return "联通"
+	case operatorCampus:
+		return "校园网"
+	default:
+		return "移动"
+	}
+}
+
+func (op operator) suffix() string {
+	switch op {
+	case operatorCMCC:
+		return "@cmcc"
+	case operatorTelecom:
+		return "@dx"
+	case operatorUnicom:
+		return "@lt"
+	case operatorCampus:
+		return "@xyw"
+	default:
+		return "@cmcc"
+	}
+}
 
 type config struct {
 	account        string
 	password       string
+	operator       operator
 	portalURL      string
 	campusMode     campus
 	accountSuffix  string
 	suffixExplicit bool
 }
 
-func loadConfig(path string) (config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return config{}, fmt.Errorf("读取登录配置失败：%w", err)
+type storedConfig struct {
+	Account   string   `json:"account"`
+	Password  string   `json:"password"`
+	Operator  operator `json:"operator"`
+	PortalURL string   `json:"portal_url,omitempty"`
+}
+
+func (c config) valid() bool {
+	return strings.TrimSpace(c.account) != "" && strings.TrimSpace(c.password) != ""
+}
+
+func (c config) operatorName() string {
+	if c.operator != "" {
+		return c.operator.displayName()
 	}
-	vars := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		vars[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"'`)
-	}
-	id, password := vars["STUDENT_ID"], vars["PASSWORD"]
-	if id == "" || password == "" {
-		return config{}, errors.New(".env 必须包含 STUDENT_ID 和 PASSWORD")
-	}
-	_, explicit := vars["ACCOUNT_SUFFIX"]
-	suffix := vars["ACCOUNT_SUFFIX"]
-	if suffix != "" && !strings.HasPrefix(suffix, "@") {
-		return config{}, errors.New("ACCOUNT_SUFFIX 必须以 @ 开头，或留空")
-	}
-	mode := campus(strings.ToLower(vars["CAMPUS"]))
-	if mode == "" {
-		mode = campusAuto
-	}
-	if mode != campusAuto && mode != campusWenchang && mode != campusNanhu {
-		return config{}, errors.New("CAMPUS 只能为 auto、wenchang 或 nanhu")
-	}
-	return config{account: id, password: password, portalURL: vars["PORTAL_URL"], campusMode: mode, accountSuffix: suffix, suffixExplicit: explicit}, nil
+	return "移动"
 }
 
 func (c config) accountFor(site campus) string {
-	if strings.Contains(c.account, "@") {
-		return c.account
+	acc := strings.TrimSpace(c.account)
+	if strings.Contains(acc, "@") {
+		return acc
 	}
 	if c.suffixExplicit {
-		return c.account + c.accountSuffix
+		return acc + c.accountSuffix
 	}
-	// The account realm is an operator choice, not a campus identifier. The
-	// user's @xyw account has now authenticated on both campuses.
-	if site == campusWenchang || site == campusNanhu {
-		return c.account + "@xyw"
+	if c.operator != "" {
+		return acc + c.operator.suffix()
 	}
-	return c.account
+	return acc + "@xyw"
 }
 
 func mask(s string) string {
@@ -72,4 +94,72 @@ func mask(s string) string {
 		return "****"
 	}
 	return s[:2] + "****" + s[len(s)-2:]
+}
+
+func appDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	dir := filepath.Join(home, ".campus-keeper")
+	_ = os.MkdirAll(dir, 0700)
+	return dir
+}
+
+func configPath() string {
+	return filepath.Join(appDataDir(), "config.dat")
+}
+
+func logPath() string {
+	return filepath.Join(appDataDir(), "keeper.log")
+}
+
+func saveEncryptedConfig(cfg config) error {
+	s := storedConfig{
+		Account:   strings.TrimSpace(cfg.account),
+		Password:  cfg.password,
+		Operator:  cfg.operator,
+		PortalURL: cfg.portalURL,
+	}
+	if s.Operator == "" {
+		s.Operator = operatorCMCC
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	enc, err := encryptData(raw)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath(), enc, 0600)
+}
+
+func loadEncryptedConfig() (config, error) {
+	enc, err := os.ReadFile(configPath())
+	if err != nil {
+		return config{}, err
+	}
+	raw, err := decryptData(enc)
+	if err != nil {
+		return config{}, err
+	}
+	var s storedConfig
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return config{}, err
+	}
+	if s.Account == "" || s.Password == "" {
+		return config{}, errors.New("账号或密码为空")
+	}
+	op := s.Operator
+	if op == "" {
+		op = operatorCMCC
+	}
+	return config{
+		account:    s.Account,
+		password:   s.Password,
+		operator:   op,
+		portalURL:  s.PortalURL,
+		campusMode: campusAuto,
+	}, nil
 }

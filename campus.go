@@ -48,7 +48,7 @@ func campusName(site campus) string {
 	case campusNanhu:
 		return "南湖"
 	default:
-		return "校区未识别"
+		return "未识别"
 	}
 }
 
@@ -91,5 +91,5 @@ func chooseCampus(mode campus, portal string, link linkState, remembered campus)
 		return remembered, nil
 	}
 	_ = link // SSID CUMT_Stu exists on both campuses, so it cannot identify Nanhu.
-	return "", errors.New("无法可靠识别校区；等待网关指纹或在 .env 设置 CAMPUS=nanhu / CAMPUS=wenchang")
+	return "", errors.New("无法识别：等待网关指纹")
 }
