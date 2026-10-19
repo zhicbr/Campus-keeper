@@ -5,6 +5,8 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,6 +25,9 @@ const (
 	wmDestroy         = 0x0002
 	wmCommand         = 0x0111
 	wmSize            = 0x0005
+	wmCtlColorEdit    = 0x0133
+	wmCtlColorDlg     = 0x0136
+	wmCtlColorStatic  = 0x0138
 	wmRButtonUp       = 0x0205
 	wmLButtonDblClk   = 0x0203
 	wmSetFont         = 0x0030
@@ -97,9 +102,17 @@ var (
 	getWindowTextLength = user32.NewProc("GetWindowTextLengthW")
 	messageBox          = user32.NewProc("MessageBoxW")
 	shellExecute        = shell32.NewProc("ShellExecuteW")
-	openDesktop         = user32.NewProc("OpenDesktopW")
-	setThreadDesktop    = user32.NewProc("SetThreadDesktop")
-	isDialogMessage     = user32.NewProc("IsDialogMessageW")
+	openDesktop           = user32.NewProc("OpenDesktopW")
+	setThreadDesktop      = user32.NewProc("SetThreadDesktop")
+	isDialogMessage       = user32.NewProc("IsDialogMessageW")
+	setTextColor          = gdi32.NewProc("SetTextColor")
+	setBkColor            = gdi32.NewProc("SetBkColor")
+	setBkMode             = gdi32.NewProc("SetBkMode")
+	createSolidBrush      = gdi32.NewProc("CreateSolidBrush")
+	createActCtx          = kernel32.NewProc("CreateActCtxW")
+	activateActCtx        = kernel32.NewProc("ActivateActCtx")
+	dwmapi                = syscall.NewLazyDLL("dwmapi.dll")
+	dwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 type winPoint struct{ x, y int32 }
@@ -178,8 +191,12 @@ type trayUI struct {
 	dash           dashboardInfo
 	consoleVisible bool
 	currentIcon    uintptr
+	fontTitle      uintptr
+	fontSubtitle   uintptr
 	fontUI         uintptr
 	fontLog        uintptr
+	brushWhite     uintptr
+	brushDarkLog   uintptr
 	quit           func()
 	onReconnect    func()
 	getConfig      func() config
@@ -187,10 +204,68 @@ type trayUI struct {
 	done           chan struct{}
 }
 
-func createUIFont(name string, size int32) uintptr {
+const appManifestXML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="CampusKeeper" type="win32"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>`
+
+type actCtx struct {
+	cbSize                  uint32
+	dwFlags                 uint32
+	lpSource                *uint16
+	wProcessorArchitecture uint16
+	wLangId                 uint16
+	lpAssemblyDirectory     *uint16
+	lpResourceName          *uint16
+	lpApplicationName       *uint16
+	hModule                 uintptr
+}
+
+func enableVisualStyles(manifestPath string) (uintptr, uintptr) {
+	manifestUTF16 := syscall.StringToUTF16Ptr(manifestPath)
+	act := actCtx{
+		cbSize:   uint32(unsafe.Sizeof(actCtx{})),
+		dwFlags:  0,
+		lpSource: manifestUTF16,
+	}
+	hAct, _, _ := createActCtx.Call(uintptr(unsafe.Pointer(&act)))
+	if hAct == 0 || hAct == ^uintptr(0) {
+		return 0, 0
+	}
+	var cookie uintptr
+	ok, _, _ := activateActCtx.Call(hAct, uintptr(unsafe.Pointer(&cookie)))
+	if ok == 0 {
+		return 0, 0
+	}
+	return hAct, cookie
+}
+
+func applyModernWindowAttributes(hwnd uintptr, darkTitle bool) {
+	if dwmSetWindowAttribute.Find() == nil {
+		roundCorner := int32(2) // DWMWCP_ROUND (Windows 11)
+		dwmSetWindowAttribute.Call(hwnd, 33, uintptr(unsafe.Pointer(&roundCorner)), 4)
+		if darkTitle {
+			darkVal := int32(1) // DWMWA_USE_IMMERSIVE_DARK_MODE
+			dwmSetWindowAttribute.Call(hwnd, 20, uintptr(unsafe.Pointer(&darkVal)), 4)
+		}
+	}
+}
+
+func createUIFont(name string, size int32, weight int32) uintptr {
 	fontName := syscall.StringToUTF16Ptr(name)
 	hFont, _, _ := createFont.Call(
-		uintptr(-size), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0,
+		uintptr(-size), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 5, 0,
 		uintptr(unsafe.Pointer(fontName)),
 	)
 	return hFont
@@ -229,8 +304,19 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 	instance, _, _ := getModuleHandle.Call(0)
 	className := syscall.StringToUTF16Ptr("WenchangCampusKeeperTray")
 
-	t.fontUI = createUIFont("Microsoft YaHei UI", 12)
-	t.fontLog = createUIFont("Consolas", 14)
+	manifestPath := filepath.Join(appDataDir(), "app.manifest")
+	if _, err := os.Stat(manifestPath); err != nil {
+		_ = os.WriteFile(manifestPath, []byte(appManifestXML), 0644)
+	}
+	enableVisualStyles(manifestPath)
+
+	t.fontTitle = createUIFont("Microsoft YaHei UI", 16, 600)
+	t.fontSubtitle = createUIFont("Microsoft YaHei UI", 11, 400)
+	t.fontUI = createUIFont("Microsoft YaHei UI", 12, 400)
+	t.fontLog = createUIFont("Consolas", 13, 400)
+
+	t.brushWhite, _, _ = createSolidBrush.Call(0x00FFFFFF)
+	t.brushDarkLog, _, _ = createSolidBrush.Call(0x001B1818)
 
 	callback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
 		switch message {
@@ -258,6 +344,12 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		case settingsMessage:
 			t.doOpenSettings()
 			return 0
+		case wmCtlColorEdit:
+			if hwnd == t.logWindow || lparam == t.logEdit {
+				setTextColor.Call(wparam, 0x00E7E4E4)
+				setBkColor.Call(wparam, 0x001B1818)
+				return t.brushDarkLog
+			}
 		case wmSize:
 			if hwnd == t.logWindow && t.logEdit != 0 {
 				moveWindow.Call(t.logEdit, 0, 0, uintptr(uint16(lparam)), uintptr(uint16(lparam>>16)), 1)
@@ -315,14 +407,14 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		return
 	}
 
-	// 1. Log window (centered, modern)
+	// 1. Log window (centered, modern dark developer console)
 	screenWidth, _, _ := getSystemMetrics.Call(0)
 	screenHeight, _, _ := getSystemMetrics.Call(1)
 	logW, logH := int32(860), int32(520)
 	logX := (int32(screenWidth) - logW) / 2
 	logY := (int32(screenHeight) - logH) / 2
 
-	logTitle := syscall.StringToUTF16Ptr("CampusKeeper - 日志")
+	logTitle := syscall.StringToUTF16Ptr("CampusKeeper - 运行日志")
 	logWindow, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(logTitle)), 0x00CF0000, uintptr(logX), uintptr(logY), uintptr(logW), uintptr(logH), 0, 0, instance, 0)
 	if logWindow == 0 {
 		ready <- errors.New("无法创建日志窗口")
@@ -330,6 +422,7 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		return
 	}
 	t.logWindow = logWindow
+	applyModernWindowAttributes(logWindow, true)
 
 	editClass := syscall.StringToUTF16Ptr("EDIT")
 	edit, _, _ := createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, 0x50200844, 0, 0, uintptr(logW), uintptr(logH), logWindow, 0, instance, 0)
@@ -344,14 +437,24 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		sendMessage.Call(edit, wmSetFont, t.fontLog, 1)
 	}
 
-	// 2. Settings window (centered, modern)
-	dlgW, dlgH := int32(380), int32(250)
+	// 2. Settings window (centered, modern white card layout)
+	dlgW, dlgH := int32(420), int32(290)
 	dlgX := (int32(screenWidth) - dlgW) / 2
 	dlgY := (int32(screenHeight) - dlgH) / 2
 
 	settingsClassName := syscall.StringToUTF16Ptr("CampusKeeperSettingsClass")
 	settingsCallback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
 		switch message {
+		case wmCtlColorStatic:
+			setTextColor.Call(wparam, 0x00554133)
+			setBkMode.Call(wparam, 1) // TRANSPARENT
+			return t.brushWhite
+		case wmCtlColorEdit:
+			setTextColor.Call(wparam, 0x002A170F)
+			setBkColor.Call(wparam, 0x00FFFFFF)
+			return t.brushWhite
+		case wmCtlColorDlg:
+			return t.brushWhite
 		case wmCommand:
 			cmd := uint16(wparam)
 			if cmd == cmdSave {
@@ -396,7 +499,7 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		res, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
 		return res
 	})
-	swc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: settingsCallback, instance: instance, className: settingsClassName}
+	swc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: settingsCallback, instance: instance, className: settingsClassName, background: t.brushWhite}
 	registerClassEx.Call(uintptr(unsafe.Pointer(&swc)))
 
 	dlgTitle := syscall.StringToUTF16Ptr("CampusKeeper - 账号设置")
@@ -409,27 +512,34 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		t.hwnd, 0, instance, 0,
 	)
 	t.settingsWindow = settingsWindow
+	applyModernWindowAttributes(settingsWindow, false)
 
 	staticClass := syscall.StringToUTF16Ptr("STATIC")
 	comboClass := syscall.StringToUTF16Ptr("COMBOBOX")
 	buttonClass := syscall.StringToUTF16Ptr("BUTTON")
 
-	lblAcc, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号:"))), wsChild|wsVisible, 35, 30, 60, 20, settingsWindow, 0, instance, 0)
-	t.accountInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esAutohscroll|wsTabstop, 105, 27, 215, 24, settingsWindow, 0, instance, 0)
+	lblTitle, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("CampusKeeper"))), wsChild|wsVisible, 40, 20, 260, 26, settingsWindow, 0, instance, 0)
+	sendMessage.Call(lblTitle, wmSetFont, t.fontTitle, 1)
 
-	lblPwd, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("密码:"))), wsChild|wsVisible, 35, 70, 60, 20, settingsWindow, 0, instance, 0)
-	t.passwordInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esPassword|esAutohscroll|wsTabstop, 105, 67, 215, 24, settingsWindow, 0, instance, 0)
+	lblSub, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("校园网认证与运营商配置"))), wsChild|wsVisible, 40, 48, 300, 20, settingsWindow, 0, instance, 0)
+	sendMessage.Call(lblSub, wmSetFont, t.fontSubtitle, 1)
 
-	lblOp, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商:"))), wsChild|wsVisible, 35, 110, 60, 20, settingsWindow, 0, instance, 0)
-	t.operatorCombo, _, _ = createWindowEx.Call(0, uintptr(unsafe.Pointer(comboClass)), 0, wsChild|wsVisible|cbsDropdownList|wsTabstop, 105, 107, 215, 200, settingsWindow, 0, instance, 0)
+	lblAcc, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号:"))), wsChild|wsVisible, 40, 85, 60, 24, settingsWindow, 0, instance, 0)
+	t.accountInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esAutohscroll|wsTabstop, 105, 82, 270, 28, settingsWindow, 0, instance, 0)
+
+	lblPwd, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("密码:"))), wsChild|wsVisible, 40, 125, 60, 24, settingsWindow, 0, instance, 0)
+	t.passwordInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esPassword|esAutohscroll|wsTabstop, 105, 122, 270, 28, settingsWindow, 0, instance, 0)
+
+	lblOp, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商:"))), wsChild|wsVisible, 40, 165, 60, 24, settingsWindow, 0, instance, 0)
+	t.operatorCombo, _, _ = createWindowEx.Call(0, uintptr(unsafe.Pointer(comboClass)), 0, wsChild|wsVisible|cbsDropdownList|wsTabstop, 105, 162, 270, 200, settingsWindow, 0, instance, 0)
 
 	for _, name := range []string{"中国移动", "中国电信", "中国联通", "校园网"} {
 		sPtr := syscall.StringToUTF16Ptr(name)
 		sendMessage.Call(t.operatorCombo, cbAddString, 0, uintptr(unsafe.Pointer(sPtr)))
 	}
 
-	btnSave, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("保存"))), wsChild|wsVisible|bsDefPushButton|wsTabstop, 95, 160, 85, 30, settingsWindow, cmdSave, instance, 0)
-	btnCancel, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("取消"))), wsChild|wsVisible|wsTabstop, 205, 160, 85, 30, settingsWindow, cmdCancel, instance, 0)
+	btnSave, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("保存"))), wsChild|wsVisible|bsDefPushButton|wsTabstop, 185, 215, 85, 32, settingsWindow, cmdSave, instance, 0)
+	btnCancel, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("取消"))), wsChild|wsVisible|wsTabstop, 290, 215, 85, 32, settingsWindow, cmdCancel, instance, 0)
 
 	if t.fontUI != 0 {
 		for _, c := range []uintptr{lblAcc, t.accountInput, lblPwd, t.passwordInput, lblOp, t.operatorCombo, btnSave, btnCancel} {
@@ -567,7 +677,7 @@ func (t *trayUI) popupMenu() {
 		logLabel = "隐藏日志窗口"
 	}
 	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(logLabel))))
-	appendMenu.Call(menu, mfString, menuCmdOpenDir, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("日志目录"))))
+	appendMenu.Call(menu, mfString, menuCmdOpenDir, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("数据目录"))))
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 	appendMenu.Call(menu, mfString, menuCmdExit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出"))))
 
@@ -712,8 +822,12 @@ func (t *trayUI) close() {
 	t.mu.Lock()
 	hwnd := t.hwnd
 	icon := t.currentIcon
+	fTitle := t.fontTitle
+	fSub := t.fontSubtitle
 	fUI := t.fontUI
 	fLog := t.fontLog
+	bWhite := t.brushWhite
+	bDark := t.brushDarkLog
 	t.mu.Unlock()
 
 	if hwnd != 0 {
@@ -722,11 +836,23 @@ func (t *trayUI) close() {
 	if icon != 0 {
 		destroyIcon.Call(icon)
 	}
+	if fTitle != 0 {
+		deleteObject.Call(fTitle)
+	}
+	if fSub != 0 {
+		deleteObject.Call(fSub)
+	}
 	if fUI != 0 {
 		deleteObject.Call(fUI)
 	}
 	if fLog != 0 {
 		deleteObject.Call(fLog)
+	}
+	if bWhite != 0 {
+		deleteObject.Call(bWhite)
+	}
+	if bDark != 0 {
+		deleteObject.Call(bDark)
 	}
 	<-t.done
 }
