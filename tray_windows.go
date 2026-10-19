@@ -31,8 +31,10 @@ const (
 
 	wmClose         = 0x0010
 	wmDestroy       = 0x0002
+	wmRButtonDown   = 0x0204
 	wmRButtonUp     = 0x0205
 	wmLButtonDblClk = 0x0203
+	wmContextMenu   = 0x007B
 
 	mfString    = 0x00000000
 	mfGrayed    = 0x00000001
@@ -206,7 +208,12 @@ func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveC
 		return nil, err
 	}
 
-	go t.webviewLoop(showConsole)
+	wvReady := make(chan error, 1)
+	go t.webviewLoop(wvReady, showConsole)
+	if err := <-wvReady; err != nil {
+		// Webview failed to initialize, but tray still works
+		_ = err
+	}
 
 	setConsoleWriter(t)
 	return t, nil
@@ -227,11 +234,11 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 	trayCallback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
 		switch message {
 		case trayMessage:
-			switch lparam {
+			switch uint16(lparam) {
+			case wmRButtonUp, wmRButtonDown, wmContextMenu:
+				t.popupMenu()
 			case wmLButtonDblClk:
 				t.toggleWindow()
-			case wmRButtonUp:
-				t.popupMenu()
 			}
 			return 0
 		case statusMessage:
@@ -258,7 +265,14 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 	wc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: trayCallback, instance: instance, className: trayClassName}
 	registerClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
-	hwndTray, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(trayClassName)), 0, 0, 0, 0, 0, 0, 0, 0, instance, 0)
+	hwndTray, _, _ := createWindowEx.Call(
+		0,
+		uintptr(unsafe.Pointer(trayClassName)),
+		uintptr(unsafe.Pointer(trayClassName)),
+		0x80000000, // WS_POPUP
+		0, 0, 0, 0,
+		0, 0, instance, 0,
+	)
 	if hwndTray == 0 {
 		ready <- errors.New("无法创建系统托盘监听窗口")
 		return
@@ -296,11 +310,12 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 	}
 }
 
-func (t *trayUI) webviewLoop(initialShow bool) {
+func (t *trayUI) webviewLoop(ready chan<- error, initialShow bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	if _, err := webviewloader.GetInstalledVersion(); err != nil {
+		ready <- err
 		return
 	}
 
@@ -318,6 +333,7 @@ func (t *trayUI) webviewLoop(initialShow bool) {
 		},
 	})
 	if wv == nil {
+		ready <- errors.New("无法创建 WebView2 窗口")
 		return
 	}
 
@@ -436,6 +452,8 @@ func (t *trayUI) webviewLoop(initialShow bool) {
 		showWindow.Call(hwndWebview, 0) // SW_HIDE
 	}
 
+	ready <- nil
+
 	// WebView2 dedicated message loop
 	wv.Run()
 }
@@ -477,7 +495,13 @@ func (t *trayUI) hideWindow() {
 func (t *trayUI) toggleWindow() {
 	t.mu.Lock()
 	visible := t.windowVisible
+	wv := t.wv
+	hwnd := t.hwndWebview
 	t.mu.Unlock()
+
+	if wv == nil || hwnd == 0 {
+		return
+	}
 	if visible {
 		t.hideWindow()
 	} else {
@@ -612,6 +636,8 @@ func (t *trayUI) popupMenu() {
 	getCursorPos.Call(uintptr(unsafe.Pointer(&point)))
 	setForegroundWindow.Call(hwnd)
 	selected, _, _ := trackPopupMenu.Call(menu, 0x100|0x2, uintptr(point.x), uintptr(point.y), 0, hwnd, 0)
+	postMessage.Call(hwnd, 0, 0, 0) // WM_NULL (MSDN Q139526 fix)
+
 	switch selected {
 	case menuCmdReconnect:
 		if t.onReconnect != nil {
@@ -629,6 +655,7 @@ func (t *trayUI) popupMenu() {
 		if t.quit != nil {
 			t.quit()
 		}
+		os.Exit(0)
 	}
 }
 
