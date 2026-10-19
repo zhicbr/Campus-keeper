@@ -3,7 +3,9 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,131 +13,66 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
+
+	webview2 "github.com/jchv/go-webview2"
+	"github.com/jchv/go-webview2/webviewloader"
 )
 
 const (
-	trayMessage       = 0x8001
-	statusMessage     = 0x8002
-	logMessage        = 0x8003
-	wakeMessage       = 0x8004
-	settingsMessage   = 0x8005
-	wmClose           = 0x0010
-	wmDestroy         = 0x0002
-	wmCommand         = 0x0111
-	wmSize            = 0x0005
-	wmCtlColorEdit    = 0x0133
-	wmCtlColorDlg     = 0x0136
-	wmCtlColorStatic  = 0x0138
-	wmRButtonUp       = 0x0205
-	wmLButtonDblClk   = 0x0203
-	wmSetFont         = 0x0030
-	emSetSel          = 0x00B1
-	emLineScroll      = 0x00B6
-	emScrollCaret     = 0x00B7
-	emGetFirstLine    = 0x00CE
-	nimAdd            = 0
-	nimModify         = 1
-	nimDelete         = 2
-	nifMessageIconTip = 0x7
+	trayMessage       = 0x0401 // WM_USER + 1
+	nifMessageIconTip = 0x0007
+	nimAdd            = 0x00000000
+	nimModify         = 0x00000001
+	nimDelete         = 0x00000002
 
-	// Menu flags
-	mfString    = 0x0000
-	mfGrayed    = 0x0001
-	mfDisabled  = 0x0002
-	mfSeparator = 0x0800
+	wmClose         = 0x0010
+	wmDestroy       = 0x0002
+	wmRButtonUp     = 0x0205
+	wmLButtonDblClk = 0x0203
 
-	// Menu command IDs
-	menuCmdReconnect = 101
-	menuCmdSettings  = 102
-	menuCmdLogs      = 103
-	menuCmdOpenDir   = 104
-	menuCmdExit      = 105
+	mfString    = 0x00000000
+	mfGrayed    = 0x00000001
+	mfSeparator = 0x00000800
 
-	// Settings dialog command IDs
-	cmdSave   = 1001
-	cmdCancel = 1002
+	wakeMessage      = 0x0404
 
-	cbsDropdownList = 0x0003
-	cbAddString     = 0x0143
-	cbSetCurSel     = 0x014E
-	cbGetCurSel     = 0x0147
-	esPassword      = 0x0020
-	esAutohscroll   = 0x0080
-	bsDefPushButton = 0x0001
-	wsChild         = 0x40000000
-	wsVisible       = 0x10000000
-	wsTabstop       = 0x00010000
-	wsBorder        = 0x00800000
+	menuCmdHeader    = 2001
+	menuCmdReconnect = 2002
+	menuCmdSettings  = 2003
+	menuCmdLogs      = 2004
+	menuCmdOpenDir   = 2005
+	menuCmdExit      = 2006
 )
 
 var (
-	user32              = syscall.NewLazyDLL("user32.dll")
-	kernel32            = syscall.NewLazyDLL("kernel32.dll")
-	shell32             = syscall.NewLazyDLL("shell32.dll")
-	registerClassEx     = user32.NewProc("RegisterClassExW")
-	createWindowEx      = user32.NewProc("CreateWindowExW")
-	defWindowProc       = user32.NewProc("DefWindowProcW")
-	getMessage          = user32.NewProc("GetMessageW")
-	translateMessage    = user32.NewProc("TranslateMessage")
-	dispatchMessage     = user32.NewProc("DispatchMessageW")
-	postMessage         = user32.NewProc("PostMessageW")
-	postQuitMessage     = user32.NewProc("PostQuitMessage")
-	destroyWindow       = user32.NewProc("DestroyWindow")
-	showWindow          = user32.NewProc("ShowWindow")
-	moveWindow          = user32.NewProc("MoveWindow")
-	setWindowText       = user32.NewProc("SetWindowTextW")
-	sendMessage         = user32.NewProc("SendMessageW")
-	getScrollInfo       = user32.NewProc("GetScrollInfo")
-	createPopupMenu     = user32.NewProc("CreatePopupMenu")
-	appendMenu          = user32.NewProc("AppendMenuW")
-	trackPopupMenu      = user32.NewProc("TrackPopupMenu")
-	destroyMenu         = user32.NewProc("DestroyMenu")
-	getCursorPos        = user32.NewProc("GetCursorPos")
-	setForegroundWindow = user32.NewProc("SetForegroundWindow")
-	shellNotifyIcon     = shell32.NewProc("Shell_NotifyIconW")
-	getModuleHandle     = kernel32.NewProc("GetModuleHandleW")
-	getSystemMetrics    = user32.NewProc("GetSystemMetrics")
-	createFont          = gdi32.NewProc("CreateFontW")
-	getWindowText       = user32.NewProc("GetWindowTextW")
-	getWindowTextLength = user32.NewProc("GetWindowTextLengthW")
-	messageBox          = user32.NewProc("MessageBoxW")
-	shellExecute        = shell32.NewProc("ShellExecuteW")
+	user32                = syscall.NewLazyDLL("user32.dll")
+	kernel32              = syscall.NewLazyDLL("kernel32.dll")
+	shell32               = syscall.NewLazyDLL("shell32.dll")
+	dwmapi                = syscall.NewLazyDLL("dwmapi.dll")
+	registerClassEx       = user32.NewProc("RegisterClassExW")
+	createWindowEx        = user32.NewProc("CreateWindowExW")
+	defWindowProc         = user32.NewProc("DefWindowProcW")
+	destroyWindow         = user32.NewProc("DestroyWindow")
+	showWindow            = user32.NewProc("ShowWindow")
+	createPopupMenu       = user32.NewProc("CreatePopupMenu")
+	appendMenu            = user32.NewProc("AppendMenuW")
+	trackPopupMenu        = user32.NewProc("TrackPopupMenu")
+	destroyMenu           = user32.NewProc("DestroyMenu")
+	getCursorPos          = user32.NewProc("GetCursorPos")
+	setForegroundWindow   = user32.NewProc("SetForegroundWindow")
+	shellNotifyIcon       = shell32.NewProc("Shell_NotifyIconW")
+	getModuleHandle       = kernel32.NewProc("GetModuleHandleW")
+	shellExecute          = shell32.NewProc("ShellExecuteW")
 	openDesktop           = user32.NewProc("OpenDesktopW")
 	setThreadDesktop      = user32.NewProc("SetThreadDesktop")
-	isDialogMessage       = user32.NewProc("IsDialogMessageW")
-	setTextColor          = gdi32.NewProc("SetTextColor")
-	setBkColor            = gdi32.NewProc("SetBkColor")
-	setBkMode             = gdi32.NewProc("SetBkMode")
-	createSolidBrush      = gdi32.NewProc("CreateSolidBrush")
-	createActCtx          = kernel32.NewProc("CreateActCtxW")
-	activateActCtx        = kernel32.NewProc("ActivateActCtx")
-	dwmapi                = syscall.NewLazyDLL("dwmapi.dll")
+	setWindowLongPtr      = user32.NewProc("SetWindowLongPtrW")
+	setWindowLong         = user32.NewProc("SetWindowLongW")
+	callWindowProc        = user32.NewProc("CallWindowProcW")
 	dwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 type winPoint struct{ x, y int32 }
-type scrollInfo struct {
-	size     uint32
-	mask     uint32
-	minimum  int32
-	maximum  int32
-	page     uint32
-	position int32
-	track    int32
-}
-
-type winMessage struct {
-	hwnd     uintptr
-	message  uint32
-	_        uint32
-	wparam   uintptr
-	lparam   uintptr
-	time     uint32
-	point    winPoint
-	lprivate uint32
-}
 
 type windowClass struct {
 	size        uint32
@@ -179,96 +116,55 @@ type dashboardInfo struct {
 }
 
 type trayUI struct {
-	mu             sync.Mutex
-	hwnd           uintptr
-	logWindow      uintptr
-	logEdit        uintptr
-	settingsWindow uintptr
-	accountInput   uintptr
-	passwordInput  uintptr
-	operatorCombo  uintptr
-	logText        string
-	dash           dashboardInfo
-	consoleVisible bool
-	currentIcon    uintptr
-	fontTitle      uintptr
-	fontSubtitle   uintptr
-	fontUI         uintptr
-	fontLog        uintptr
-	brushWhite     uintptr
-	brushDarkLog   uintptr
-	quit           func()
-	onReconnect    func()
-	getConfig      func() config
-	onSaveConfig   func(config)
-	done           chan struct{}
+	mu            sync.Mutex
+	hwndTray      uintptr
+	hwndWebview   uintptr
+	oldWndProc    uintptr
+	wv            webview2.WebView
+	windowVisible bool
+	dash          dashboardInfo
+	logText       string
+	currentIcon   uintptr
+
+	quit         func()
+	onReconnect  func()
+	getConfig    func() config
+	onSaveConfig func(config)
+	done         chan struct{}
 }
 
-const appManifestXML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="CampusKeeper" type="win32"/>
-  <dependency>
-    <dependentAssembly>
-      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
-    </dependentAssembly>
-  </dependency>
-  <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
-    </windowsSettings>
-  </application>
-</assembly>`
-
-type actCtx struct {
-	cbSize                  uint32
-	dwFlags                 uint32
-	lpSource                *uint16
-	wProcessorArchitecture uint16
-	wLangId                 uint16
-	lpAssemblyDirectory     *uint16
-	lpResourceName          *uint16
-	lpApplicationName       *uint16
-	hModule                 uintptr
+func initDpiAwareness() {
+	if proc := user32.NewProc("SetProcessDpiAwarenessContext"); proc.Find() == nil {
+		// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+		proc.Call(^uintptr(3))
+		return
+	}
+	if shcore := syscall.NewLazyDLL("shcore.dll"); shcore.Load() == nil {
+		if proc := shcore.NewProc("SetProcessDpiAwareness"); proc.Find() == nil {
+			// PROCESS_PER_MONITOR_DPI_AWARE = 2
+			proc.Call(2)
+			return
+		}
+	}
+	if proc := user32.NewProc("SetProcessDPIAware"); proc.Find() == nil {
+		proc.Call()
+	}
 }
 
-func enableVisualStyles(manifestPath string) (uintptr, uintptr) {
-	manifestUTF16 := syscall.StringToUTF16Ptr(manifestPath)
-	act := actCtx{
-		cbSize:   uint32(unsafe.Sizeof(actCtx{})),
-		dwFlags:  0,
-		lpSource: manifestUTF16,
+func setWndProc(hwnd uintptr, newProc uintptr) uintptr {
+	if setWindowLongPtr.Find() == nil {
+		res, _, _ := setWindowLongPtr.Call(hwnd, uintptr(^uintptr(3)), newProc) // GWLP_WNDPROC = -4
+		return res
 	}
-	hAct, _, _ := createActCtx.Call(uintptr(unsafe.Pointer(&act)))
-	if hAct == 0 || hAct == ^uintptr(0) {
-		return 0, 0
-	}
-	var cookie uintptr
-	ok, _, _ := activateActCtx.Call(hAct, uintptr(unsafe.Pointer(&cookie)))
-	if ok == 0 {
-		return 0, 0
-	}
-	return hAct, cookie
+	res, _, _ := setWindowLong.Call(hwnd, uintptr(^uintptr(3)), newProc)
+	return res
 }
 
-func applyModernWindowAttributes(hwnd uintptr, darkTitle bool) {
+func applyModernWindowAttributes(hwnd uintptr) {
 	if dwmSetWindowAttribute.Find() == nil {
 		roundCorner := int32(2) // DWMWCP_ROUND (Windows 11)
 		dwmSetWindowAttribute.Call(hwnd, 33, uintptr(unsafe.Pointer(&roundCorner)), 4)
-		if darkTitle {
-			darkVal := int32(1) // DWMWA_USE_IMMERSIVE_DARK_MODE
-			dwmSetWindowAttribute.Call(hwnd, 20, uintptr(unsafe.Pointer(&darkVal)), 4)
-		}
 	}
-}
-
-func createUIFont(name string, size int32, weight int32) uintptr {
-	fontName := syscall.StringToUTF16Ptr(name)
-	hFont, _, _ := createFont.Call(
-		uintptr(-size), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 5, 0,
-		uintptr(unsafe.Pointer(fontName)),
-	)
-	return hFont
 }
 
 func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveConfig func(config), showConsole bool) (*trayUI, error) {
@@ -291,284 +187,272 @@ func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveC
 	return t, nil
 }
 
-func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
+func (t *trayUI) loop(ready chan<- error, initialShow bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(t.done)
 
-	// Attach this GUI thread to the interactive user desktop if needed
+	initDpiAwareness()
+
 	if hDesk, _, _ := openDesktop.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Default"))), 0, 0, 0x10000000); hDesk != 0 {
 		setThreadDesktop.Call(hDesk)
 	}
 
 	instance, _, _ := getModuleHandle.Call(0)
-	className := syscall.StringToUTF16Ptr("WenchangCampusKeeperTray")
+	trayClassName := syscall.StringToUTF16Ptr("WenchangCampusKeeperTray")
 
-	manifestPath := filepath.Join(appDataDir(), "app.manifest")
-	if _, err := os.Stat(manifestPath); err != nil {
-		_ = os.WriteFile(manifestPath, []byte(appManifestXML), 0644)
-	}
-	enableVisualStyles(manifestPath)
-
-	t.fontTitle = createUIFont("Microsoft YaHei UI", 16, 600)
-	t.fontSubtitle = createUIFont("Microsoft YaHei UI", 11, 400)
-	t.fontUI = createUIFont("Microsoft YaHei UI", 12, 400)
-	t.fontLog = createUIFont("Consolas", 13, 400)
-
-	t.brushWhite, _, _ = createSolidBrush.Call(0x00FFFFFF)
-	t.brushDarkLog, _, _ = createSolidBrush.Call(0x001B1818)
-
-	callback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
+	trayCallback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
 		switch message {
 		case trayMessage:
 			switch lparam {
 			case wmLButtonDblClk:
-				t.toggleConsole()
+				t.toggleWindow()
 			case wmRButtonUp:
 				t.popupMenu()
 			}
 			return 0
-		case statusMessage:
-			t.updateIcon(nimModify)
-			return 0
-		case logMessage:
-			t.updateLogs()
-			return 0
 		case wakeMessage:
 			if t.getConfig != nil && !t.getConfig().valid() {
-				t.doOpenSettings()
+				t.openSettings()
 			} else {
 				t.showConsole()
 			}
-			return 0
-		case settingsMessage:
-			t.doOpenSettings()
-			return 0
-		case wmCtlColorEdit:
-			if hwnd == t.logWindow || lparam == t.logEdit {
-				setTextColor.Call(wparam, 0x00E7E4E4)
-				setBkColor.Call(wparam, 0x001B1818)
-				return t.brushDarkLog
-			}
-		case wmSize:
-			if hwnd == t.logWindow && t.logEdit != 0 {
-				moveWindow.Call(t.logEdit, 0, 0, uintptr(uint16(lparam)), uintptr(uint16(lparam>>16)), 1)
-			}
-			return 0
-		case wmClose:
-			if hwnd == t.logWindow {
-				showWindow.Call(hwnd, 0)
-				t.mu.Lock()
-				t.consoleVisible = false
-				t.mu.Unlock()
-				return 0
-			}
-			if hwnd == t.settingsWindow {
-				showWindow.Call(hwnd, 0)
-				return 0
-			}
-			if t.logWindow != 0 {
-				destroyWindow.Call(t.logWindow)
-			}
-			if t.settingsWindow != 0 {
-				destroyWindow.Call(t.settingsWindow)
-			}
-			destroyWindow.Call(hwnd)
-			return 0
-		case wmDestroy:
-			if hwnd == t.hwnd {
-				t.updateIcon(nimDelete)
-				postQuitMessage.Call(0)
-			}
-			return 0
-		}
-		result, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
-		return result
-	})
-
-	wc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: callback, instance: instance, className: className}
-	if atom, _, _ := registerClassEx.Call(uintptr(unsafe.Pointer(&wc))); atom == 0 {
-		ready <- errors.New("无法注册托盘窗口")
-		return
-	}
-
-	hwnd, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(className)), 0, 0, 0, 0, 0, 0, 0, instance, 0)
-	if hwnd == 0 {
-		ready <- errors.New("无法创建托盘窗口")
-		return
-	}
-	t.mu.Lock()
-	t.hwnd = hwnd
-	t.mu.Unlock()
-
-	if !t.updateIcon(nimAdd) {
-		ready <- errors.New("无法添加系统托盘图标")
-		destroyWindow.Call(hwnd)
-		return
-	}
-
-	// 1. Log window (centered, modern dark developer console)
-	screenWidth, _, _ := getSystemMetrics.Call(0)
-	screenHeight, _, _ := getSystemMetrics.Call(1)
-	logW, logH := int32(860), int32(520)
-	logX := (int32(screenWidth) - logW) / 2
-	logY := (int32(screenHeight) - logH) / 2
-
-	logTitle := syscall.StringToUTF16Ptr("CampusKeeper - 运行日志")
-	logWindow, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(logTitle)), 0x00CF0000, uintptr(logX), uintptr(logY), uintptr(logW), uintptr(logH), 0, 0, instance, 0)
-	if logWindow == 0 {
-		ready <- errors.New("无法创建日志窗口")
-		destroyWindow.Call(hwnd)
-		return
-	}
-	t.logWindow = logWindow
-	applyModernWindowAttributes(logWindow, true)
-
-	editClass := syscall.StringToUTF16Ptr("EDIT")
-	edit, _, _ := createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, 0x50200844, 0, 0, uintptr(logW), uintptr(logH), logWindow, 0, instance, 0)
-	if edit == 0 {
-		ready <- errors.New("无法创建日志文本框")
-		destroyWindow.Call(logWindow)
-		destroyWindow.Call(hwnd)
-		return
-	}
-	t.logEdit = edit
-	if t.fontLog != 0 {
-		sendMessage.Call(edit, wmSetFont, t.fontLog, 1)
-	}
-
-	// 2. Settings window (centered, modern white card layout)
-	dlgW, dlgH := int32(420), int32(290)
-	dlgX := (int32(screenWidth) - dlgW) / 2
-	dlgY := (int32(screenHeight) - dlgH) / 2
-
-	settingsClassName := syscall.StringToUTF16Ptr("CampusKeeperSettingsClass")
-	settingsCallback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
-		switch message {
-		case wmCtlColorStatic:
-			setTextColor.Call(wparam, 0x00554133)
-			setBkMode.Call(wparam, 1) // TRANSPARENT
-			return t.brushWhite
-		case wmCtlColorEdit:
-			setTextColor.Call(wparam, 0x002A170F)
-			setBkColor.Call(wparam, 0x00FFFFFF)
-			return t.brushWhite
-		case wmCtlColorDlg:
-			return t.brushWhite
-		case wmCommand:
-			cmd := uint16(wparam)
-			if cmd == cmdSave {
-				account := getEditText(t.accountInput)
-				password := getEditText(t.passwordInput)
-				if account == "" || password == "" {
-					msg := syscall.StringToUTF16Ptr("请填写完整的账号和密码")
-					title := syscall.StringToUTF16Ptr("提示")
-					messageBox.Call(hwnd, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x30)
-					return 0
-				}
-				sel, _, _ := sendMessage.Call(t.operatorCombo, cbGetCurSel, 0, 0)
-				op := operatorCMCC
-				switch sel {
-				case 0:
-					op = operatorCMCC
-				case 1:
-					op = operatorTelecom
-				case 2:
-					op = operatorUnicom
-				case 3:
-					op = operatorCampus
-				}
-				if t.onSaveConfig != nil {
-					go t.onSaveConfig(config{
-						account:  account,
-						password: password,
-						operator: op,
-					})
-				}
-				showWindow.Call(hwnd, 0)
-				return 0
-			}
-			if cmd == cmdCancel {
-				showWindow.Call(hwnd, 0)
-				return 0
-			}
-		case wmClose:
-			showWindow.Call(hwnd, 0)
 			return 0
 		}
 		res, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
 		return res
 	})
-	swc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: settingsCallback, instance: instance, className: settingsClassName, background: t.brushWhite}
-	registerClassEx.Call(uintptr(unsafe.Pointer(&swc)))
 
-	dlgTitle := syscall.StringToUTF16Ptr("CampusKeeper - 账号设置")
-	settingsWindow, _, _ := createWindowEx.Call(
-		0x00010000, // WS_EX_CONTROLPARENT
-		uintptr(unsafe.Pointer(settingsClassName)),
-		uintptr(unsafe.Pointer(dlgTitle)),
-		0x80C80000, // WS_POPUP | WS_CAPTION | WS_SYSMENU
-		uintptr(dlgX), uintptr(dlgY), uintptr(dlgW), uintptr(dlgH),
-		t.hwnd, 0, instance, 0,
-	)
-	t.settingsWindow = settingsWindow
-	applyModernWindowAttributes(settingsWindow, false)
+	wc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: trayCallback, instance: instance, className: trayClassName}
+	registerClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
-	staticClass := syscall.StringToUTF16Ptr("STATIC")
-	comboClass := syscall.StringToUTF16Ptr("COMBOBOX")
-	buttonClass := syscall.StringToUTF16Ptr("BUTTON")
+	hwndTray, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(trayClassName)), 0, 0, 0, 0, 0, 0, 0, 0, instance, 0)
+	if hwndTray == 0 {
+		ready <- errors.New("无法创建系统托盘监听窗口")
+		return
+	}
+	t.mu.Lock()
+	t.hwndTray = hwndTray
+	t.mu.Unlock()
 
-	lblTitle, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("CampusKeeper"))), wsChild|wsVisible, 40, 20, 260, 26, settingsWindow, 0, instance, 0)
-	sendMessage.Call(lblTitle, wmSetFont, t.fontTitle, 1)
-
-	lblSub, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("校园网认证与运营商配置"))), wsChild|wsVisible, 40, 48, 300, 20, settingsWindow, 0, instance, 0)
-	sendMessage.Call(lblSub, wmSetFont, t.fontSubtitle, 1)
-
-	lblAcc, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号:"))), wsChild|wsVisible, 40, 85, 60, 24, settingsWindow, 0, instance, 0)
-	t.accountInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esAutohscroll|wsTabstop, 105, 82, 270, 28, settingsWindow, 0, instance, 0)
-
-	lblPwd, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("密码:"))), wsChild|wsVisible, 40, 125, 60, 24, settingsWindow, 0, instance, 0)
-	t.passwordInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esPassword|esAutohscroll|wsTabstop, 105, 122, 270, 28, settingsWindow, 0, instance, 0)
-
-	lblOp, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商:"))), wsChild|wsVisible, 40, 165, 60, 24, settingsWindow, 0, instance, 0)
-	t.operatorCombo, _, _ = createWindowEx.Call(0, uintptr(unsafe.Pointer(comboClass)), 0, wsChild|wsVisible|cbsDropdownList|wsTabstop, 105, 162, 270, 200, settingsWindow, 0, instance, 0)
-
-	for _, name := range []string{"中国移动", "中国电信", "中国联通", "校园网"} {
-		sPtr := syscall.StringToUTF16Ptr(name)
-		sendMessage.Call(t.operatorCombo, cbAddString, 0, uintptr(unsafe.Pointer(sPtr)))
+	if !t.updateIcon(nimAdd) {
+		ready <- errors.New("无法添加系统托盘图标")
+		destroyWindow.Call(hwndTray)
+		return
 	}
 
-	btnSave, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("保存"))), wsChild|wsVisible|bsDefPushButton|wsTabstop, 185, 215, 85, 32, settingsWindow, cmdSave, instance, 0)
-	btnCancel, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("取消"))), wsChild|wsVisible|wsTabstop, 290, 215, 85, 32, settingsWindow, cmdCancel, instance, 0)
+	// Initialize WebView2
+	if _, err := webviewloader.GetInstalledVersion(); err != nil {
+		ready <- fmt.Errorf("系统中未找到 WebView2 运行时: %w", err)
+		destroyWindow.Call(hwndTray)
+		return
+	}
 
-	if t.fontUI != 0 {
-		for _, c := range []uintptr{lblAcc, t.accountInput, lblPwd, t.passwordInput, lblOp, t.operatorCombo, btnSave, btnCancel} {
-			sendMessage.Call(c, wmSetFont, t.fontUI, 1)
+	wvDataDir := filepath.Join(appDataDir(), "wv2")
+	_ = os.MkdirAll(wvDataDir, 0755)
+
+	wv := webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:    false,
+		DataPath: wvDataDir,
+		WindowOptions: webview2.WindowOptions{
+			Title:  "CampusKeeper",
+			Width:  500,
+			Height: 560,
+			Center: true,
+		},
+	})
+	if wv == nil {
+		ready <- errors.New("无法创建现代卡片窗口")
+		destroyWindow.Call(hwndTray)
+		return
+	}
+
+	hwndWebview := uintptr(wv.Window())
+	t.mu.Lock()
+	t.wv = wv
+	t.hwndWebview = hwndWebview
+	t.mu.Unlock()
+
+	// Subclass to intercept WM_CLOSE -> hide window instead of destroy
+	var oldWndProc uintptr
+	subclassCallback := syscall.NewCallback(func(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
+		if msg == wmClose {
+			t.hideWindow()
+			return 0
 		}
+		res, _, _ := callWindowProc.Call(oldWndProc, hwnd, uintptr(msg), wp, lp)
+		return res
+	})
+	oldWndProc = setWndProc(hwndWebview, subclassCallback)
+	t.oldWndProc = oldWndProc
+
+	applyModernWindowAttributes(hwndWebview)
+	wv.SetSize(460, 500, webview2.HintMin)
+
+	// Bind Go RPC methods
+	wv.Bind("saveConfig", func(account, password, opStr string) (bool, error) {
+		op := operatorCMCC
+		switch opStr {
+		case "移动", "中国移动":
+			op = operatorCMCC
+		case "电信", "中国电信":
+			op = operatorTelecom
+		case "联通", "中国联通":
+			op = operatorUnicom
+		case "校园网":
+			op = operatorCampus
+		}
+		if t.onSaveConfig != nil {
+			go t.onSaveConfig(config{
+				account:  account,
+				password: password,
+				operator: op,
+			})
+		}
+		return true, nil
+	})
+
+	wv.Bind("reconnect", func() (bool, error) {
+		if t.onReconnect != nil {
+			go t.onReconnect()
+		}
+		return true, nil
+	})
+
+	wv.Bind("openDataDir", func() (bool, error) {
+		dir := appDataDir()
+		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
+		return true, nil
+	})
+
+	type jsConfig struct {
+		Account  string `json:"account"`
+		Password string `json:"password"`
+		Operator string `json:"operator"`
+	}
+	wv.Bind("getConfig", func() (jsConfig, error) {
+		var res jsConfig
+		if t.getConfig != nil {
+			cfg := t.getConfig()
+			res.Account = cfg.account
+			res.Password = cfg.password
+			res.Operator = cfg.operatorName()
+		}
+		return res, nil
+	})
+
+	type jsDashboard struct {
+		Status   string `json:"status"`
+		Network  string `json:"network"`
+		Operator string `json:"operator"`
+		IP       string `json:"ip"`
+		IsCampus bool   `json:"isCampus"`
+	}
+	wv.Bind("getDashboard", func() (jsDashboard, error) {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return jsDashboard{
+			Status:   t.dash.status,
+			Network:  t.dash.network,
+			Operator: t.dash.operator,
+			IP:       t.dash.ip,
+			IsCampus: t.dash.isCampus,
+		}, nil
+	})
+
+	wv.Bind("getLogs", func() (string, error) {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.logText, nil
+	})
+
+	wv.Bind("hideWindow", func() (bool, error) {
+		t.hideWindow()
+		return true, nil
+	})
+
+	wv.SetHtml(appHTML)
+
+	if initialShow {
+		t.windowVisible = true
+		showWindow.Call(hwndWebview, 5) // SW_SHOW
+		setForegroundWindow.Call(hwndWebview)
+	} else {
+		t.windowVisible = false
+		showWindow.Call(hwndWebview, 0) // SW_HIDE
 	}
 
 	setConsoleWriter(t)
-	if initialConsole {
-		t.toggleConsole()
-	}
-
 	ready <- nil
 
-	var msg winMessage
-	for {
-		ret, _, _ := getMessage.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
-		if ret == 0 || ret == ^uintptr(0) {
-			return
-		}
-		if t.settingsWindow != 0 {
-			res, _, _ := isDialogMessage.Call(t.settingsWindow, uintptr(unsafe.Pointer(&msg)))
-			if res != 0 {
-				continue
-			}
-		}
-		translateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		dispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
+	// Run message loop
+	wv.Run()
+
+	// Clean up
+	setConsoleWriter(io.Discard)
+	t.updateIcon(nimDelete)
+	if t.hwndTray != 0 {
+		destroyWindow.Call(t.hwndTray)
 	}
+	t.mu.Lock()
+	icon := t.currentIcon
+	t.mu.Unlock()
+	if icon != 0 {
+		destroyIcon.Call(icon)
+	}
+}
+
+func (t *trayUI) showWindowWithTab(tab string) {
+	t.mu.Lock()
+	wv := t.wv
+	hwnd := t.hwndWebview
+	t.mu.Unlock()
+	if wv == nil || hwnd == 0 {
+		return
+	}
+	wv.Dispatch(func() {
+		wv.Eval(fmt.Sprintf("if (window.switchTab) window.switchTab('%s');", tab))
+		showWindow.Call(hwnd, 5)
+		setForegroundWindow.Call(hwnd)
+		t.mu.Lock()
+		t.windowVisible = true
+		t.mu.Unlock()
+	})
+}
+
+func (t *trayUI) hideWindow() {
+	t.mu.Lock()
+	wv := t.wv
+	hwnd := t.hwndWebview
+	t.mu.Unlock()
+	if wv == nil || hwnd == 0 {
+		return
+	}
+	wv.Dispatch(func() {
+		showWindow.Call(hwnd, 0)
+		t.mu.Lock()
+		t.windowVisible = false
+		t.mu.Unlock()
+	})
+}
+
+func (t *trayUI) toggleWindow() {
+	t.mu.Lock()
+	visible := t.windowVisible
+	t.mu.Unlock()
+	if visible {
+		t.hideWindow()
+	} else {
+		t.showWindowWithTab("settings")
+	}
+}
+
+func (t *trayUI) openSettings() {
+	t.showWindowWithTab("settings")
+}
+
+func (t *trayUI) showConsole() {
+	t.showWindowWithTab("logs")
 }
 
 func (t *trayUI) updateDashboard(status, network, operator, ip string, isCampus bool) {
@@ -580,36 +464,51 @@ func (t *trayUI) updateDashboard(status, network, operator, ip string, isCampus 
 		ip:       ip,
 		isCampus: isCampus,
 	}
-	hwnd := t.hwnd
+	wv := t.wv
 	t.mu.Unlock()
-	if hwnd != 0 {
-		postMessage.Call(hwnd, statusMessage, 0, 0)
+
+	t.updateIcon(nimModify)
+
+	if wv != nil {
+		dashData, _ := json.Marshal(map[string]interface{}{
+			"status":   status,
+			"network":  network,
+			"operator": operator,
+			"ip":       ip,
+			"isCampus": isCampus,
+		})
+		wv.Dispatch(func() {
+			wv.Eval(fmt.Sprintf("if (window.onStatusUpdate) window.onStatusUpdate(%s);", string(dashData)))
+		})
 	}
 }
 
-func (t *trayUI) updateIcon(action uintptr) bool {
+func (t *trayUI) updateIcon(action uint32) bool {
 	t.mu.Lock()
-	dash, hwnd := t.dash, t.hwnd
+	hwnd := t.hwndTray
+	dash := t.dash
+	oldIcon := t.currentIcon
 	t.mu.Unlock()
 
+	if hwnd == 0 {
+		return false
+	}
+
 	var kind iconKind
-	switch dash.status {
-	case "已连接":
-		if dash.isCampus {
-			kind = iconCampusOnline
-		} else {
-			kind = iconExternalOnline
-		}
-	case "连接中", "获取地址中", "检测中":
+	if dash.isCampus {
+		kind = iconCampusOnline
+	} else if strings.Contains(dash.status, "正常") || strings.Contains(dash.status, "已连接") {
+		kind = iconExternalOnline
+	} else if strings.Contains(dash.status, "重试") || strings.Contains(dash.status, "认证中") || strings.Contains(dash.status, "正在") {
 		kind = iconConnecting
-	default:
+	} else {
 		kind = iconOffline
 	}
 
 	newIcon := createShieldIcon(kind)
-	if newIcon == 0 {
-		return false
-	}
+	t.mu.Lock()
+	t.currentIcon = newIcon
+	t.mu.Unlock()
 
 	data := notifyIconData{
 		size:     uint32(unsafe.Sizeof(notifyIconData{})),
@@ -619,64 +518,43 @@ func (t *trayUI) updateIcon(action uintptr) bool {
 		callback: trayMessage,
 		icon:     newIcon,
 	}
-	copy(data.tip[:], syscall.StringToUTF16("CampusKeeper"))
-	result, _, _ := shellNotifyIcon.Call(action, uintptr(unsafe.Pointer(&data)))
-	if result == 0 && action == nimAdd {
-		for i := 0; i < 5; i++ {
-			time.Sleep(200 * time.Millisecond)
-			result, _, _ = shellNotifyIcon.Call(action, uintptr(unsafe.Pointer(&data)))
-			if result != 0 {
-				break
-			}
-		}
-	}
 
-	t.mu.Lock()
-	if t.currentIcon != 0 {
-		destroyIcon.Call(t.currentIcon)
+	tip := "CampusKeeper"
+	if dash.status != "" {
+		tip += " - " + dash.status
 	}
-	t.currentIcon = newIcon
-	t.mu.Unlock()
+	utfTip := syscall.StringToUTF16(tip)
+	copy(data.tip[:], utfTip)
 
-	return result != 0
+	res, _, _ := shellNotifyIcon.Call(uintptr(action), uintptr(unsafe.Pointer(&data)))
+	if oldIcon != 0 {
+		destroyIcon.Call(oldIcon)
+	}
+	return res != 0
 }
 
 func (t *trayUI) popupMenu() {
+	t.mu.Lock()
+	hwnd := t.hwndTray
+	dash := t.dash
+	t.mu.Unlock()
+
+	if hwnd == 0 {
+		return
+	}
+
 	menu, _, _ := createPopupMenu.Call()
 	if menu == 0 {
 		return
 	}
 	defer destroyMenu.Call(menu)
 
-	t.mu.Lock()
-	dash := t.dash
-	hwnd := t.hwnd
-	visible := t.consoleVisible
-	t.mu.Unlock()
-
-	// 1. Header (disabled)
-	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("CampusKeeper"))))
+	headerText := fmt.Sprintf("CampusKeeper: %s", dash.status)
+	appendMenu.Call(menu, mfString|mfGrayed, menuCmdHeader, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(headerText))))
 	appendMenu.Call(menu, mfSeparator, 0, 0)
-
-	// 2. Minimalist Dashboard
-	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.status))))
-	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("网络："+dash.network))))
-	if dash.operator != "" {
-		appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商："+dash.operator))))
-	}
-	if dash.ip != "" {
-		appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("地址："+dash.ip))))
-	}
-	appendMenu.Call(menu, mfSeparator, 0, 0)
-
-	// 3. Actions
-	appendMenu.Call(menu, mfString, menuCmdReconnect, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("重新连接"))))
-	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号设置..."))))
-	logLabel := "运行日志..."
-	if visible {
-		logLabel = "隐藏日志窗口"
-	}
-	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(logLabel))))
+	appendMenu.Call(menu, mfString, menuCmdReconnect, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("立即重连"))))
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("设置"))))
+	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运行日志"))))
 	appendMenu.Call(menu, mfString, menuCmdOpenDir, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("数据目录"))))
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 	appendMenu.Call(menu, mfString, menuCmdExit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出"))))
@@ -693,166 +571,51 @@ func (t *trayUI) popupMenu() {
 	case menuCmdSettings:
 		t.openSettings()
 	case menuCmdLogs:
-		t.toggleConsole()
+		t.showConsole()
 	case menuCmdOpenDir:
 		dir := appDataDir()
 		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
 	case menuCmdExit:
-		t.quit()
-	}
-}
-
-func (t *trayUI) showConsole() {
-	t.mu.Lock()
-	t.consoleVisible = true
-	t.mu.Unlock()
-	showWindow.Call(t.logWindow, 5)
-	t.updateLogs()
-	setForegroundWindow.Call(t.logWindow)
-}
-
-func (t *trayUI) toggleConsole() {
-	t.mu.Lock()
-	if t.consoleVisible {
-		t.consoleVisible = false
-		t.mu.Unlock()
-		showWindow.Call(t.logWindow, 0)
-		return
-	}
-	t.mu.Unlock()
-	t.showConsole()
-}
-
-func getEditText(hwnd uintptr) string {
-	length, _, _ := getWindowTextLength.Call(hwnd)
-	if length == 0 {
-		return ""
-	}
-	buf := make([]uint16, length+1)
-	getWindowText.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), length+1)
-	return strings.TrimSpace(syscall.UTF16ToString(buf))
-}
-
-func (t *trayUI) doOpenSettings() {
-	if t.settingsWindow == 0 {
-		return
-	}
-	if t.getConfig != nil {
-		cfg := t.getConfig()
-		setWindowText.Call(t.accountInput, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(cfg.account))))
-		setWindowText.Call(t.passwordInput, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(cfg.password))))
-		sel := 0
-		switch cfg.operator {
-		case operatorCMCC:
-			sel = 0
-		case operatorTelecom:
-			sel = 1
-		case operatorUnicom:
-			sel = 2
-		case operatorCampus:
-			sel = 3
+		t.close()
+		if t.quit != nil {
+			t.quit()
 		}
-		sendMessage.Call(t.operatorCombo, cbSetCurSel, uintptr(sel), 0)
-	}
-	showWindow.Call(t.settingsWindow, 5)
-	setForegroundWindow.Call(t.settingsWindow)
-}
-
-func (t *trayUI) openSettings() {
-	t.mu.Lock()
-	hwnd := t.hwnd
-	t.mu.Unlock()
-	if hwnd != 0 {
-		postMessage.Call(hwnd, settingsMessage, 0, 0)
 	}
 }
 
 func (t *trayUI) Write(p []byte) (int, error) {
 	t.mu.Lock()
-	t.logText += string(p)
+	chunk := string(p)
+	t.logText += chunk
 	if len(t.logText) > 48<<10 {
 		t.logText = t.logText[len(t.logText)-(40<<10):]
 		if i := strings.IndexByte(t.logText, '\n'); i >= 0 {
 			t.logText = t.logText[i+1:]
 		}
 	}
-	visible, hwnd := t.consoleVisible, t.hwnd
+	visible := t.windowVisible
+	wv := t.wv
 	t.mu.Unlock()
-	if visible && hwnd != 0 {
-		postMessage.Call(hwnd, logMessage, 0, 0)
+
+	if visible && wv != nil {
+		jsonChunk, _ := json.Marshal(chunk)
+		wv.Dispatch(func() {
+			wv.Eval(fmt.Sprintf("if (window.onNewLog) window.onNewLog(%s);", string(jsonChunk)))
+		})
 	}
 	return len(p), nil
-}
-
-func (t *trayUI) updateLogs() {
-	t.mu.Lock()
-	content := t.logText
-	edit := t.logEdit
-	t.mu.Unlock()
-	if edit != 0 {
-		followTail := logAtBottom(edit)
-		firstLine, _, _ := sendMessage.Call(edit, emGetFirstLine, 0, 0)
-		text := syscall.StringToUTF16(strings.ReplaceAll(content, "\n", "\r\n"))
-		setWindowText.Call(edit, uintptr(unsafe.Pointer(&text[0])))
-		if followTail {
-			end := uintptr(len(text) - 1)
-			sendMessage.Call(edit, emSetSel, end, end)
-			sendMessage.Call(edit, emScrollCaret, 0, 0)
-		} else {
-			currentLine, _, _ := sendMessage.Call(edit, emGetFirstLine, 0, 0)
-			if firstLine > currentLine {
-				sendMessage.Call(edit, emLineScroll, 0, firstLine-currentLine)
-			}
-		}
-	}
-}
-
-func logAtBottom(edit uintptr) bool {
-	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 0x7}
-	ok, _, _ := getScrollInfo.Call(edit, 1, uintptr(unsafe.Pointer(&info)))
-	if ok == 0 || info.page == 0 {
-		return true
-	}
-	lastPage := int64(info.maximum) - int64(info.page) + 1
-	return int64(info.position) >= lastPage-1
 }
 
 func (t *trayUI) close() {
 	setConsoleWriter(io.Discard)
 	t.mu.Lock()
-	hwnd := t.hwnd
-	icon := t.currentIcon
-	fTitle := t.fontTitle
-	fSub := t.fontSubtitle
-	fUI := t.fontUI
-	fLog := t.fontLog
-	bWhite := t.brushWhite
-	bDark := t.brushDarkLog
+	wv := t.wv
 	t.mu.Unlock()
 
-	if hwnd != 0 {
-		postMessage.Call(hwnd, wmClose, 0, 0)
-	}
-	if icon != 0 {
-		destroyIcon.Call(icon)
-	}
-	if fTitle != 0 {
-		deleteObject.Call(fTitle)
-	}
-	if fSub != 0 {
-		deleteObject.Call(fSub)
-	}
-	if fUI != 0 {
-		deleteObject.Call(fUI)
-	}
-	if fLog != 0 {
-		deleteObject.Call(fLog)
-	}
-	if bWhite != 0 {
-		deleteObject.Call(bWhite)
-	}
-	if bDark != 0 {
-		deleteObject.Call(bDark)
+	if wv != nil {
+		wv.Dispatch(func() {
+			wv.Terminate()
+		})
 	}
 	<-t.done
 }

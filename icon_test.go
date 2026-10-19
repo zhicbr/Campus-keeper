@@ -3,8 +3,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -72,16 +70,4 @@ func TestShellNotifyIconDirect(t *testing.T) {
 		t.Fatalf("shieldIcon failed: %v", errShield)
 	}
 	shellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&data)))
-}
-
-func TestActivateVisualStyles(t *testing.T) {
-	manifestPath := filepath.Join(t.TempDir(), "test.manifest")
-	if err := os.WriteFile(manifestPath, []byte(appManifestXML), 0644); err != nil {
-		t.Fatal(err)
-	}
-	hAct, cookie := enableVisualStyles(manifestPath)
-	if hAct == 0 {
-		t.Fatal("failed to enable visual styles")
-	}
-	t.Logf("Visual styles enabled successfully, hAct: %d, cookie: %d", hAct, cookie)
 }
