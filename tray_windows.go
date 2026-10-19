@@ -20,7 +20,10 @@ import (
 )
 
 const (
-	trayMessage       = 0x0401 // WM_USER + 1
+	trayMessage   = 0x0401 // WM_USER + 1
+	statusMessage = 0x0402 // WM_USER + 2
+	wakeMessage   = 0x0404 // WM_USER + 4
+
 	nifMessageIconTip = 0x0007
 	nimAdd            = 0x00000000
 	nimModify         = 0x00000001
@@ -35,8 +38,6 @@ const (
 	mfGrayed    = 0x00000001
 	mfDisabled  = 0x00000002
 	mfSeparator = 0x00000800
-
-	wakeMessage      = 0x0404
 
 	menuCmdHeader    = 2001
 	menuCmdReconnect = 2002
@@ -71,9 +72,25 @@ var (
 	setWindowLong         = user32.NewProc("SetWindowLongW")
 	callWindowProc        = user32.NewProc("CallWindowProcW")
 	dwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+	getMessage            = user32.NewProc("GetMessageW")
+	translateMessage      = user32.NewProc("TranslateMessage")
+	dispatchMessage       = user32.NewProc("DispatchMessageW")
+	postMessage           = user32.NewProc("PostMessageW")
+	postQuitMessage       = user32.NewProc("PostQuitMessage")
 )
 
 type winPoint struct{ x, y int32 }
+
+type winMessage struct {
+	hwnd     uintptr
+	message  uint32
+	_        uint32
+	wparam   uintptr
+	lparam   uintptr
+	time     uint32
+	point    winPoint
+	lprivate uint32
+}
 
 type windowClass struct {
 	size        uint32
@@ -180,20 +197,25 @@ func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveC
 		onSaveConfig: onSaveConfig,
 		done:         make(chan struct{}),
 	}
-	ready := make(chan error, 1)
-	go t.loop(ready, showConsole)
-	if err := <-ready; err != nil {
+
+	initDpiAwareness()
+
+	trayReady := make(chan error, 1)
+	go t.trayLoop(trayReady)
+	if err := <-trayReady; err != nil {
 		return nil, err
 	}
+
+	go t.webviewLoop(showConsole)
+
+	setConsoleWriter(t)
 	return t, nil
 }
 
-func (t *trayUI) loop(ready chan<- error, initialShow bool) {
+func (t *trayUI) trayLoop(ready chan<- error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(t.done)
-
-	initDpiAwareness()
 
 	if hDesk, _, _ := openDesktop.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Default"))), 0, 0, 0x10000000); hDesk != 0 {
 		setThreadDesktop.Call(hDesk)
@@ -212,12 +234,21 @@ func (t *trayUI) loop(ready chan<- error, initialShow bool) {
 				t.popupMenu()
 			}
 			return 0
+		case statusMessage:
+			t.updateIcon(nimModify)
+			return 0
 		case wakeMessage:
 			if t.getConfig != nil && !t.getConfig().valid() {
 				t.openSettings()
 			} else {
 				t.showConsole()
 			}
+			return 0
+		case wmClose:
+			destroyWindow.Call(hwnd)
+			return 0
+		case wmDestroy:
+			postQuitMessage.Call(0)
 			return 0
 		}
 		res, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
@@ -242,10 +273,34 @@ func (t *trayUI) loop(ready chan<- error, initialShow bool) {
 		return
 	}
 
-	// Initialize WebView2
+	ready <- nil
+
+	// Pure Win32 message loop - completely independent from WebView2
+	var msg winMessage
+	for {
+		ret, _, _ := getMessage.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		if ret == 0 || ret == ^uintptr(0) {
+			break
+		}
+		translateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+		dispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+
+	t.updateIcon(nimDelete)
+	destroyWindow.Call(hwndTray)
+	t.mu.Lock()
+	icon := t.currentIcon
+	t.mu.Unlock()
+	if icon != 0 {
+		destroyIcon.Call(icon)
+	}
+}
+
+func (t *trayUI) webviewLoop(initialShow bool) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if _, err := webviewloader.GetInstalledVersion(); err != nil {
-		ready <- fmt.Errorf("系统中未找到 WebView2 运行时: %w", err)
-		destroyWindow.Call(hwndTray)
 		return
 	}
 
@@ -263,8 +318,6 @@ func (t *trayUI) loop(ready chan<- error, initialShow bool) {
 		},
 	})
 	if wv == nil {
-		ready <- errors.New("无法创建现代卡片窗口")
-		destroyWindow.Call(hwndTray)
 		return
 	}
 
@@ -383,24 +436,8 @@ func (t *trayUI) loop(ready chan<- error, initialShow bool) {
 		showWindow.Call(hwndWebview, 0) // SW_HIDE
 	}
 
-	setConsoleWriter(t)
-	ready <- nil
-
-	// Run message loop
+	// WebView2 dedicated message loop
 	wv.Run()
-
-	// Clean up
-	setConsoleWriter(io.Discard)
-	t.updateIcon(nimDelete)
-	if t.hwndTray != 0 {
-		destroyWindow.Call(t.hwndTray)
-	}
-	t.mu.Lock()
-	icon := t.currentIcon
-	t.mu.Unlock()
-	if icon != 0 {
-		destroyIcon.Call(icon)
-	}
 }
 
 func (t *trayUI) showWindowWithTab(tab string) {
@@ -413,7 +450,7 @@ func (t *trayUI) showWindowWithTab(tab string) {
 	}
 	wv.Dispatch(func() {
 		wv.Eval(fmt.Sprintf("if (window.switchTab) window.switchTab('%s');", tab))
-		showWindow.Call(hwnd, 5)
+		showWindow.Call(hwnd, 5) // SW_SHOW
 		setForegroundWindow.Call(hwnd)
 		t.mu.Lock()
 		t.windowVisible = true
@@ -430,7 +467,7 @@ func (t *trayUI) hideWindow() {
 		return
 	}
 	wv.Dispatch(func() {
-		showWindow.Call(hwnd, 0)
+		showWindow.Call(hwnd, 0) // SW_HIDE
 		t.mu.Lock()
 		t.windowVisible = false
 		t.mu.Unlock()
@@ -466,9 +503,12 @@ func (t *trayUI) updateDashboard(status, network, operator, ip string, isCampus 
 		isCampus: isCampus,
 	}
 	wv := t.wv
+	hwndTray := t.hwndTray
 	t.mu.Unlock()
 
-	t.updateIcon(nimModify)
+	if hwndTray != 0 {
+		postMessage.Call(hwndTray, statusMessage, 0, 0)
+	}
 
 	if wv != nil {
 		dashData, _ := json.Marshal(map[string]interface{}{
@@ -618,6 +658,7 @@ func (t *trayUI) Write(p []byte) (int, error) {
 func (t *trayUI) close() {
 	setConsoleWriter(io.Discard)
 	t.mu.Lock()
+	hwndTray := t.hwndTray
 	wv := t.wv
 	t.mu.Unlock()
 
@@ -625,6 +666,9 @@ func (t *trayUI) close() {
 		wv.Dispatch(func() {
 			wv.Terminate()
 		})
+	}
+	if hwndTray != 0 {
+		postMessage.Call(hwndTray, wmClose, 0, 0)
 	}
 	<-t.done
 }
