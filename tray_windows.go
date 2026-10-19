@@ -18,6 +18,7 @@ const (
 	statusMessage     = 0x8002
 	logMessage        = 0x8003
 	wakeMessage       = 0x8004
+	settingsMessage   = 0x8005
 	wmClose           = 0x0010
 	wmDestroy         = 0x0002
 	wmCommand         = 0x0111
@@ -98,6 +99,7 @@ var (
 	shellExecute        = shell32.NewProc("ShellExecuteW")
 	openDesktop         = user32.NewProc("OpenDesktopW")
 	setThreadDesktop    = user32.NewProc("SetThreadDesktop")
+	isDialogMessage     = user32.NewProc("IsDialogMessageW")
 )
 
 type winPoint struct{ x, y int32 }
@@ -247,7 +249,14 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 			t.updateLogs()
 			return 0
 		case wakeMessage:
-			t.showConsole()
+			if t.getConfig != nil && !t.getConfig().valid() {
+				t.doOpenSettings()
+			} else {
+				t.showConsole()
+			}
+			return 0
+		case settingsMessage:
+			t.doOpenSettings()
 			return 0
 		case wmSize:
 			if hwnd == t.logWindow && t.logEdit != 0 {
@@ -335,6 +344,99 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		sendMessage.Call(edit, wmSetFont, t.fontLog, 1)
 	}
 
+	// 2. Settings window (centered, modern)
+	dlgW, dlgH := int32(380), int32(250)
+	dlgX := (int32(screenWidth) - dlgW) / 2
+	dlgY := (int32(screenHeight) - dlgH) / 2
+
+	settingsClassName := syscall.StringToUTF16Ptr("CampusKeeperSettingsClass")
+	settingsCallback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
+		switch message {
+		case wmCommand:
+			cmd := uint16(wparam)
+			if cmd == cmdSave {
+				account := getEditText(t.accountInput)
+				password := getEditText(t.passwordInput)
+				if account == "" || password == "" {
+					msg := syscall.StringToUTF16Ptr("请填写完整的账号和密码")
+					title := syscall.StringToUTF16Ptr("提示")
+					messageBox.Call(hwnd, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x30)
+					return 0
+				}
+				sel, _, _ := sendMessage.Call(t.operatorCombo, cbGetCurSel, 0, 0)
+				op := operatorCMCC
+				switch sel {
+				case 0:
+					op = operatorCMCC
+				case 1:
+					op = operatorTelecom
+				case 2:
+					op = operatorUnicom
+				case 3:
+					op = operatorCampus
+				}
+				if t.onSaveConfig != nil {
+					go t.onSaveConfig(config{
+						account:  account,
+						password: password,
+						operator: op,
+					})
+				}
+				showWindow.Call(hwnd, 0)
+				return 0
+			}
+			if cmd == cmdCancel {
+				showWindow.Call(hwnd, 0)
+				return 0
+			}
+		case wmClose:
+			showWindow.Call(hwnd, 0)
+			return 0
+		}
+		res, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
+		return res
+	})
+	swc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: settingsCallback, instance: instance, className: settingsClassName}
+	registerClassEx.Call(uintptr(unsafe.Pointer(&swc)))
+
+	dlgTitle := syscall.StringToUTF16Ptr("CampusKeeper - 账号设置")
+	settingsWindow, _, _ := createWindowEx.Call(
+		0x00010000, // WS_EX_CONTROLPARENT
+		uintptr(unsafe.Pointer(settingsClassName)),
+		uintptr(unsafe.Pointer(dlgTitle)),
+		0x80C80000, // WS_POPUP | WS_CAPTION | WS_SYSMENU
+		uintptr(dlgX), uintptr(dlgY), uintptr(dlgW), uintptr(dlgH),
+		t.hwnd, 0, instance, 0,
+	)
+	t.settingsWindow = settingsWindow
+
+	staticClass := syscall.StringToUTF16Ptr("STATIC")
+	comboClass := syscall.StringToUTF16Ptr("COMBOBOX")
+	buttonClass := syscall.StringToUTF16Ptr("BUTTON")
+
+	lblAcc, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号:"))), wsChild|wsVisible, 35, 30, 60, 20, settingsWindow, 0, instance, 0)
+	t.accountInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esAutohscroll|wsTabstop, 105, 27, 215, 24, settingsWindow, 0, instance, 0)
+
+	lblPwd, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("密码:"))), wsChild|wsVisible, 35, 70, 60, 20, settingsWindow, 0, instance, 0)
+	t.passwordInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esPassword|esAutohscroll|wsTabstop, 105, 67, 215, 24, settingsWindow, 0, instance, 0)
+
+	lblOp, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商:"))), wsChild|wsVisible, 35, 110, 60, 20, settingsWindow, 0, instance, 0)
+	t.operatorCombo, _, _ = createWindowEx.Call(0, uintptr(unsafe.Pointer(comboClass)), 0, wsChild|wsVisible|cbsDropdownList|wsTabstop, 105, 107, 215, 200, settingsWindow, 0, instance, 0)
+
+	for _, name := range []string{"中国移动", "中国电信", "中国联通", "校园网"} {
+		sPtr := syscall.StringToUTF16Ptr(name)
+		sendMessage.Call(t.operatorCombo, cbAddString, 0, uintptr(unsafe.Pointer(sPtr)))
+	}
+
+	btnSave, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("保存"))), wsChild|wsVisible|bsDefPushButton|wsTabstop, 95, 160, 85, 30, settingsWindow, cmdSave, instance, 0)
+	btnCancel, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("取消"))), wsChild|wsVisible|wsTabstop, 205, 160, 85, 30, settingsWindow, cmdCancel, instance, 0)
+
+	if t.fontUI != 0 {
+		for _, c := range []uintptr{lblAcc, t.accountInput, lblPwd, t.passwordInput, lblOp, t.operatorCombo, btnSave, btnCancel} {
+			sendMessage.Call(c, wmSetFont, t.fontUI, 1)
+		}
+	}
+
 	setConsoleWriter(t)
 	if initialConsole {
 		t.toggleConsole()
@@ -347,6 +449,12 @@ func (t *trayUI) loop(ready chan<- error, initialConsole bool) {
 		ret, _, _ := getMessage.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		if ret == 0 || ret == ^uintptr(0) {
 			return
+		}
+		if t.settingsWindow != 0 {
+			res, _, _ := isDialogMessage.Call(t.settingsWindow, uintptr(unsafe.Pointer(&msg)))
+			if res != 0 {
+				continue
+			}
 		}
 		translateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		dispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
@@ -515,118 +623,10 @@ func getEditText(hwnd uintptr) string {
 	return strings.TrimSpace(syscall.UTF16ToString(buf))
 }
 
-func (t *trayUI) openSettings() {
-	instance, _, _ := getModuleHandle.Call(0)
+func (t *trayUI) doOpenSettings() {
 	if t.settingsWindow == 0 {
-		settingsClassName := syscall.StringToUTF16Ptr("CampusKeeperSettingsClass")
-
-		callback := syscall.NewCallback(func(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
-			switch message {
-			case wmCommand:
-				cmd := uint16(wparam)
-				if cmd == cmdSave {
-					account := getEditText(t.accountInput)
-					password := getEditText(t.passwordInput)
-					if account == "" || password == "" {
-						msg := syscall.StringToUTF16Ptr("请填写完整的账号和密码")
-						title := syscall.StringToUTF16Ptr("提示")
-						messageBox.Call(hwnd, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x30)
-						return 0
-					}
-					sel, _, _ := sendMessage.Call(t.operatorCombo, cbGetCurSel, 0, 0)
-					op := operatorCMCC
-					switch sel {
-					case 0:
-						op = operatorCMCC
-					case 1:
-						op = operatorTelecom
-					case 2:
-						op = operatorUnicom
-					case 3:
-						op = operatorCampus
-					}
-					if t.onSaveConfig != nil {
-						t.onSaveConfig(config{
-							account:  account,
-							password: password,
-							operator: op,
-						})
-					}
-					showWindow.Call(hwnd, 0)
-					return 0
-				}
-				if cmd == cmdCancel {
-					showWindow.Call(hwnd, 0)
-					return 0
-				}
-			case wmClose:
-				showWindow.Call(hwnd, 0)
-				return 0
-			}
-			res, _, _ := defWindowProc.Call(hwnd, uintptr(message), wparam, lparam)
-			return res
-		})
-
-		wc := windowClass{size: uint32(unsafe.Sizeof(windowClass{})), proc: callback, instance: instance, className: settingsClassName}
-		registerClassEx.Call(uintptr(unsafe.Pointer(&wc)))
-
-		screenWidth, _, _ := getSystemMetrics.Call(0)
-		screenHeight, _, _ := getSystemMetrics.Call(1)
-		dlgW, dlgH := int32(380), int32(250)
-		dlgX := (int32(screenWidth) - dlgW) / 2
-		dlgY := (int32(screenHeight) - dlgH) / 2
-
-		dlgTitle := syscall.StringToUTF16Ptr("CampusKeeper - 账号设置")
-		// WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE
-		hwnd, _, _ := createWindowEx.Call(
-			0x00010000, // WS_EX_CONTROLPARENT
-			uintptr(unsafe.Pointer(settingsClassName)),
-			uintptr(unsafe.Pointer(dlgTitle)),
-			0x80C80000, // WS_POPUP | WS_CAPTION | WS_SYSMENU
-			uintptr(dlgX), uintptr(dlgY), uintptr(dlgW), uintptr(dlgH),
-			t.hwnd, 0, instance, 0,
-		)
-		if hwnd == 0 {
-			return
-		}
-		t.settingsWindow = hwnd
-
-		staticClass := syscall.StringToUTF16Ptr("STATIC")
-		editClass := syscall.StringToUTF16Ptr("EDIT")
-		comboClass := syscall.StringToUTF16Ptr("COMBOBOX")
-		buttonClass := syscall.StringToUTF16Ptr("BUTTON")
-
-		// 1. Account
-		lblAcc, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号:"))), wsChild|wsVisible, 35, 30, 60, 20, hwnd, 0, instance, 0)
-		t.accountInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esAutohscroll|wsTabstop, 105, 27, 215, 24, hwnd, 0, instance, 0)
-
-		// 2. Password
-		lblPwd, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("密码:"))), wsChild|wsVisible, 35, 70, 60, 20, hwnd, 0, instance, 0)
-		t.passwordInput, _, _ = createWindowEx.Call(0x200, uintptr(unsafe.Pointer(editClass)), 0, wsChild|wsVisible|wsBorder|esPassword|esAutohscroll|wsTabstop, 105, 67, 215, 24, hwnd, 0, instance, 0)
-
-		// 3. Operator
-		lblOp, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商:"))), wsChild|wsVisible, 35, 110, 60, 20, hwnd, 0, instance, 0)
-		t.operatorCombo, _, _ = createWindowEx.Call(0, uintptr(unsafe.Pointer(comboClass)), 0, wsChild|wsVisible|cbsDropdownList|wsTabstop, 105, 107, 215, 200, hwnd, 0, instance, 0)
-
-		// Populate combo items
-		for _, name := range []string{"中国移动", "中国电信", "中国联通", "校园网"} {
-			sPtr := syscall.StringToUTF16Ptr(name)
-			sendMessage.Call(t.operatorCombo, cbAddString, 0, uintptr(unsafe.Pointer(sPtr)))
-		}
-
-		// 4. Buttons
-		btnSave, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("保存"))), wsChild|wsVisible|bsDefPushButton|wsTabstop, 95, 160, 85, 30, hwnd, cmdSave, instance, 0)
-		btnCancel, _, _ := createWindowEx.Call(0, uintptr(unsafe.Pointer(buttonClass)), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("取消"))), wsChild|wsVisible|wsTabstop, 205, 160, 85, 30, hwnd, cmdCancel, instance, 0)
-
-		// Apply modern font to all controls
-		if t.fontUI != 0 {
-			for _, c := range []uintptr{lblAcc, t.accountInput, lblPwd, t.passwordInput, lblOp, t.operatorCombo, btnSave, btnCancel} {
-				sendMessage.Call(c, wmSetFont, t.fontUI, 1)
-			}
-		}
+		return
 	}
-
-	// Pre-fill current config
 	if t.getConfig != nil {
 		cfg := t.getConfig()
 		setWindowText.Call(t.accountInput, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(cfg.account))))
@@ -644,9 +644,17 @@ func (t *trayUI) openSettings() {
 		}
 		sendMessage.Call(t.operatorCombo, cbSetCurSel, uintptr(sel), 0)
 	}
-
 	showWindow.Call(t.settingsWindow, 5)
 	setForegroundWindow.Call(t.settingsWindow)
+}
+
+func (t *trayUI) openSettings() {
+	t.mu.Lock()
+	hwnd := t.hwnd
+	t.mu.Unlock()
+	if hwnd != 0 {
+		postMessage.Call(hwnd, settingsMessage, 0, 0)
+	}
 }
 
 func (t *trayUI) Write(p []byte) (int, error) {
