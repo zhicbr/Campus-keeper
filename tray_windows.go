@@ -33,6 +33,7 @@ const (
 
 	mfString    = 0x00000000
 	mfGrayed    = 0x00000001
+	mfDisabled  = 0x00000002
 	mfSeparator = 0x00000800
 
 	wakeMessage      = 0x0404
@@ -256,8 +257,8 @@ func (t *trayUI) loop(ready chan<- error, initialShow bool) {
 		DataPath: wvDataDir,
 		WindowOptions: webview2.WindowOptions{
 			Title:  "CampusKeeper",
-			Width:  500,
-			Height: 560,
+			Width:  520,
+			Height: 640,
 			Center: true,
 		},
 	})
@@ -519,12 +520,7 @@ func (t *trayUI) updateIcon(action uint32) bool {
 		icon:     newIcon,
 	}
 
-	tip := "CampusKeeper"
-	if dash.status != "" {
-		tip += " - " + dash.status
-	}
-	utfTip := syscall.StringToUTF16(tip)
-	copy(data.tip[:], utfTip)
+	copy(data.tip[:], syscall.StringToUTF16("CampusKeeper"))
 
 	res, _, _ := shellNotifyIcon.Call(uintptr(action), uintptr(unsafe.Pointer(&data)))
 	if oldIcon != 0 {
@@ -534,27 +530,40 @@ func (t *trayUI) updateIcon(action uint32) bool {
 }
 
 func (t *trayUI) popupMenu() {
-	t.mu.Lock()
-	hwnd := t.hwndTray
-	dash := t.dash
-	t.mu.Unlock()
-
-	if hwnd == 0 {
-		return
-	}
-
 	menu, _, _ := createPopupMenu.Call()
 	if menu == 0 {
 		return
 	}
 	defer destroyMenu.Call(menu)
 
-	headerText := fmt.Sprintf("CampusKeeper: %s", dash.status)
-	appendMenu.Call(menu, mfString|mfGrayed, menuCmdHeader, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(headerText))))
+	t.mu.Lock()
+	dash := t.dash
+	hwnd := t.hwndTray
+	t.mu.Unlock()
+
+	if hwnd == 0 {
+		return
+	}
+
+	// 1. Header (disabled)
+	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("CampusKeeper"))))
 	appendMenu.Call(menu, mfSeparator, 0, 0)
-	appendMenu.Call(menu, mfString, menuCmdReconnect, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("立即重连"))))
-	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("设置"))))
-	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运行日志"))))
+
+	// 2. Minimalist Dashboard
+	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.status))))
+	appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("网络："+dash.network))))
+	if dash.operator != "" {
+		appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商："+dash.operator))))
+	}
+	if dash.ip != "" {
+		appendMenu.Call(menu, mfString|mfDisabled|mfGrayed, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("地址："+dash.ip))))
+	}
+	appendMenu.Call(menu, mfSeparator, 0, 0)
+
+	// 3. Actions
+	appendMenu.Call(menu, mfString, menuCmdReconnect, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("重新连接"))))
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号设置..."))))
+	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运行日志..."))))
 	appendMenu.Call(menu, mfString, menuCmdOpenDir, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("数据目录"))))
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 	appendMenu.Call(menu, mfString, menuCmdExit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出"))))
