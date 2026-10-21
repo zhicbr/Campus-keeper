@@ -1,13 +1,23 @@
 //go:build windows
 
-package main
+package ui
+
+import (
+	"strings"
+
+	"wenchang-campus-keeper/internal/config"
+)
+
+func GetAppHTML() string {
+	return strings.ReplaceAll(appHTML, "{{VERSION}}", config.AppVersion)
+}
 
 const appHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CampusKeeper</title>
+<title>CampusKeeper v{{VERSION}}</title>
 <style>
   * {
     box-sizing: border-box;
@@ -237,9 +247,13 @@ const appHTML = `<!DOCTYPE html>
   .footer-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
+    align-items: center;
     margin-top: 14px;
     margin-bottom: 2px;
+  }
+  .action-buttons {
+    display: flex;
+    gap: 10px;
   }
   .fluent-btn {
     height: 32px;
@@ -289,14 +303,9 @@ const appHTML = `<!DOCTYPE html>
   }
   .log-top {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
     flex-shrink: 0;
-  }
-  .log-subtext {
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--text-secondary);
   }
   .log-btns {
     display: flex;
@@ -428,8 +437,10 @@ const appHTML = `<!DOCTYPE html>
       </div>
 
       <div class="footer-actions">
-        <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">重新连接</button>
-        <button id="btnSave" class="fluent-btn fluent-btn-primary">保存配置</button>
+        <div class="action-buttons">
+          <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">重新连接</button>
+          <button id="btnSave" class="fluent-btn fluent-btn-primary">保存配置</button>
+        </div>
       </div>
     </div>
   </div>
@@ -438,7 +449,6 @@ const appHTML = `<!DOCTYPE html>
   <div id="view-logs" class="view-panel">
     <div class="log-view">
       <div class="log-top">
-        <span class="log-subtext">实时守护输出控制台</span>
         <div class="log-btns">
           <button id="btnClear" class="mini-btn">清空</button>
           <button id="btnOpenDir" class="mini-btn">数据目录</button>

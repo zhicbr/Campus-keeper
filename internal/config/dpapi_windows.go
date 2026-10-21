@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package config
 
 import (
 	"errors"
@@ -10,6 +10,7 @@ import (
 
 var (
 	crypt32            = syscall.NewLazyDLL("crypt32.dll")
+	kernel32           = syscall.NewLazyDLL("kernel32.dll")
 	procCryptProtect   = crypt32.NewProc("CryptProtectData")
 	procCryptUnprotect = crypt32.NewProc("CryptUnprotectData")
 	procLocalFree      = kernel32.NewProc("LocalFree")
@@ -20,7 +21,7 @@ type dataBlob struct {
 	pbData *byte
 }
 
-func encryptData(data []byte) ([]byte, error) {
+func EncryptData(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("cannot encrypt empty data")
 	}
@@ -43,7 +44,7 @@ func encryptData(data []byte) ([]byte, error) {
 	return res, nil
 }
 
-func decryptData(data []byte) ([]byte, error) {
+func DecryptData(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("cannot decrypt empty data")
 	}

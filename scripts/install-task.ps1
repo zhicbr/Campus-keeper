@@ -1,7 +1,8 @@
 param([switch]$StartNow)
 
 $ErrorActionPreference = 'Stop'
-$folder = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$folder = if (Test-Path (Join-Path $scriptDir '..\wenchang-campus-keeper.exe')) { (Resolve-Path "$scriptDir\..").Path } else { $scriptDir }
 $exe = Join-Path $folder 'wenchang-campus-keeper.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "请先构建 $exe" }
 if (-not (Test-Path -LiteralPath (Join-Path $folder '.env'))) { throw '缺少 .env' }

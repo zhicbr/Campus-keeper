@@ -1,4 +1,4 @@
-package main
+package diagnostics
 
 import (
 	"fmt"
@@ -8,18 +8,18 @@ import (
 	"time"
 )
 
-// rotatingLog keeps the active log small. Archived logs remain available for
+// RotatingLog keeps the active log small. Archived logs remain available for
 // diagnostics; the program does not permanently delete user files.
-type rotatingLog struct {
+type RotatingLog struct {
 	mu     sync.Mutex
 	path   string
 	file   *os.File
 	size   int64
 	max    int64
-	silent bool
+	Silent bool
 }
 
-func newRotatingLog(path string, max int64) (*rotatingLog, error) {
+func NewRotatingLog(path string, max int64) (*RotatingLog, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
@@ -29,13 +29,13 @@ func newRotatingLog(path string, max int64) (*rotatingLog, error) {
 		f.Close()
 		return nil, err
 	}
-	return &rotatingLog{path: path, file: f, size: info.Size(), max: max}, nil
+	return &RotatingLog{path: path, file: f, size: info.Size(), max: max}, nil
 }
 
-func (w *rotatingLog) Write(p []byte) (int, error) {
+func (w *RotatingLog) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.silent {
+	if !w.Silent {
 		writeConsole(p)
 	}
 	if w.size+int64(len(p)) > w.max {
@@ -48,7 +48,7 @@ func (w *rotatingLog) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (w *rotatingLog) rotate() error {
+func (w *RotatingLog) rotate() error {
 	if err := w.file.Close(); err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func (w *rotatingLog) rotate() error {
 	return nil
 }
 
-func (w *rotatingLog) Close() error {
+func (w *RotatingLog) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
@@ -79,7 +79,7 @@ func (w *rotatingLog) Close() error {
 	return w.file.Close()
 }
 
-var _ io.WriteCloser = (*rotatingLog)(nil)
+var _ io.WriteCloser = (*RotatingLog)(nil)
 
 var consoleSink = struct {
 	sync.RWMutex
@@ -92,7 +92,7 @@ func writeConsole(p []byte) {
 	consoleSink.RUnlock()
 }
 
-func setConsoleWriter(w io.Writer) {
+func SetConsoleWriter(w io.Writer) {
 	consoleSink.Lock()
 	consoleSink.writer = w
 	consoleSink.Unlock()

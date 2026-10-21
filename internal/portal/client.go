@@ -1,7 +1,8 @@
-package main
+package portal
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,26 +14,30 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wenchang-campus-keeper/internal/campus"
+	"wenchang-campus-keeper/internal/config"
+	"wenchang-campus-keeper/internal/diagnostics"
 )
 
-const probeURL = "http://www.msftconnecttest.com/connecttest.txt"
+const ProbeURL = "http://www.msftconnecttest.com/connecttest.txt"
 
-type probeResult struct {
-	online   bool
-	redirect string
-	reason   string
+type ProbeResult struct {
+	Online   bool
+	Redirect string
+	Reason   string
 }
 
-type portalClient struct {
+type Client struct {
 	client     *http.Client
-	cfg        config
+	cfg        config.Config
 	mu         sync.RWMutex
 	sourceIP   net.IP
-	diagnostic *diagnostics
+	diagnostic *diagnostics.Diagnostics
 }
 
-func newPortalClient(cfg config) *portalClient {
-	p := &portalClient{cfg: cfg}
+func NewClient(cfg config.Config) *Client {
+	p := &Client{cfg: cfg}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DisableKeepAlives = true
@@ -51,7 +56,7 @@ func newPortalClient(cfg config) *portalClient {
 			if conn != nil {
 				local, remote = conn.LocalAddr().String(), conn.RemoteAddr().String()
 			}
-			p.diagnostic.log.Printf("portal dial target=%q source=%q local=%q remote=%q elapsed=%s error=%q", address, ip.String(), local, remote, time.Since(started), diagnosticError(err))
+			p.diagnostic.Log.Printf("portal dial target=%q source=%q local=%q remote=%q elapsed=%s error=%q", address, ip.String(), local, remote, time.Since(started), diagnostics.DiagnosticError(err))
 		}
 		return conn, err
 	}
@@ -62,19 +67,52 @@ func newPortalClient(cfg config) *portalClient {
 	return p
 }
 
-// All HTTP operations run on the controller goroutine. Binding the source
-// address makes the selected Ethernet/WLAN priority effective for probes too.
-func (p *portalClient) setSourceIP(address string) {
+func (p *Client) SetSourceIP(address string) {
 	p.mu.Lock()
 	p.sourceIP = net.ParseIP(address).To4()
 	p.mu.Unlock()
 }
 
-func (p *portalClient) probe(ctx context.Context) (result probeResult) {
-	if p.diagnostic != nil {
+func (p *Client) SetDiagnostic(d *diagnostics.Diagnostics) {
+	p.mu.Lock()
+	p.diagnostic = d
+	p.mu.Unlock()
+}
+
+func (p *Client) Diagnostic() *diagnostics.Diagnostics {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.diagnostic
+}
+
+func (p *Client) SetConfig(cfg config.Config) {
+	p.mu.Lock()
+	p.cfg = cfg
+	p.mu.Unlock()
+}
+
+func (p *Client) SetHTTPClient(client *http.Client) {
+	p.client = client
+}
+
+func (p *Client) doDiagnostic(r *http.Request, label string) (*http.Response, error) {
+	p.mu.RLock()
+	d := p.diagnostic
+	p.mu.RUnlock()
+	if d == nil {
+		return p.client.Do(r)
+	}
+	return d.Request(p.client, r, label)
+}
+
+func (p *Client) Probe(ctx context.Context) (result ProbeResult) {
+	p.mu.RLock()
+	diag := p.diagnostic
+	p.mu.RUnlock()
+	if diag != nil {
 		started := time.Now()
 		defer func() {
-			p.diagnostic.log.Printf("bound probe result online=%t redirect=%q reason=%q elapsed=%s", result.online, safePortal(result.redirect), result.reason, time.Since(started))
+			diag.Log.Printf("bound probe result online=%t redirect=%q reason=%q elapsed=%s", result.Online, SafePortal(result.Redirect), result.Reason, time.Since(started))
 		}()
 	}
 	// Check the HTTP captive probe and independent HTTPS probe in parallel.
@@ -118,17 +156,17 @@ func (p *portalClient) probe(ctx context.Context) (result probeResult) {
 		}
 		answers <- a
 	}
-	go check(true, probeURL)
+	go check(true, ProbeURL)
 	go check(false, "https://www.baidu.com/")
 	var redirect string
 	var primaryErr error
 	for i := 0; i < 2; i++ {
 		select {
 		case <-ctx.Done():
-			return probeResult{reason: "外网检测已取消"}
+			return ProbeResult{Reason: "外网检测已取消"}
 		case a := <-answers:
 			if a.online {
-				return probeResult{online: true}
+				return ProbeResult{Online: true}
 			}
 			if a.primary {
 				redirect, primaryErr = a.redirect, a.err
@@ -136,70 +174,73 @@ func (p *portalClient) probe(ctx context.Context) (result probeResult) {
 		}
 	}
 	if redirect != "" {
-		return probeResult{redirect: redirect, reason: "被重定向到校园网认证页"}
+		return ProbeResult{Redirect: redirect, Reason: "被重定向到校园网认证页"}
 	}
 	var dnsErr *net.DNSError
 	if errors.As(primaryErr, &dnsErr) {
-		return probeResult{reason: "DNS 无法解析外网检测域名"}
+		return ProbeResult{Reason: "DNS 无法解析外网检测域名"}
 	}
 	if primaryErr != nil {
-		return probeResult{reason: "外网检测地址不可达"}
+		return ProbeResult{Reason: "外网检测地址不可达"}
 	}
-	return probeResult{reason: "外网检测地址返回非预期内容"}
+	return ProbeResult{Reason: "外网检测地址返回非预期内容"}
 }
 
 var portalRedirectPattern = regexp.MustCompile(`(?i)(?:location\.href|window\.location|url)\s*[=:]\s*['"](https?://[^'"<> ]+)`)
 
-var errNoAuthenticationEvidence = errors.New("本轮未收到可信校园网认证跳转，不能仅凭探测失败、旧入口或默认入口登录")
+var ErrNoAuthenticationEvidence = errors.New("本轮未收到可信校园网认证跳转，不能仅凭探测失败、旧入口或默认入口登录")
 
 // Only this round's trusted redirects establish a need to authenticate. A
 // cached/configured address is a destination, not evidence of lost login.
 // Discovery can take seconds: always probe again after it finishes.
-func (p *portalClient) prepareAuthentication(ctx context.Context, initial probeResult) (probeResult, error) {
+func (p *Client) PrepareAuthentication(ctx context.Context, initial ProbeResult) (ProbeResult, error) {
 	if err := ctx.Err(); err != nil {
-		return probeResult{}, err
+		return ProbeResult{}, err
 	}
+	p.mu.RLock()
+	diag := p.diagnostic
+	p.mu.RUnlock()
 	trusted := func(raw string) string {
-		kind, err := classifyPortal(raw)
-		if err == nil && kind != portalUnknown {
+		kind, err := campus.ClassifyPortal(raw)
+		if err == nil && kind != campus.PortalUnknown {
 			return raw
 		}
 		return ""
 	}
-	portal := trusted(initial.redirect)
+	portal := trusted(initial.Redirect)
 	if portal == "" {
 		found, _ := p.discover(ctx)
 		portal = trusted(found)
 	}
 	if err := ctx.Err(); err != nil {
-		return probeResult{}, err
+		return ProbeResult{}, err
 	}
-	fresh := p.probe(ctx)
+	fresh := p.Probe(ctx)
 	if err := ctx.Err(); err != nil {
-		return probeResult{}, err
+		return ProbeResult{}, err
 	}
-	if fresh.online {
-		if p.diagnostic != nil {
-			p.diagnostic.log.Print("authentication gate: external access recovered; LOGIN SUPPRESSED")
+	if fresh.Online {
+		if diag != nil {
+			diag.Log.Print("authentication gate: external access recovered; LOGIN SUPPRESSED")
 		}
 		return fresh, nil
 	}
-	if redirect := trusted(fresh.redirect); redirect != "" {
+	if redirect := trusted(fresh.Redirect); redirect != "" {
 		portal = redirect
 	}
 	if portal == "" {
-		if p.diagnostic != nil {
-			p.diagnostic.log.Print("authentication gate: no current trusted redirect; LOGIN SUPPRESSED")
+		if diag != nil {
+			diag.Log.Print("authentication gate: no current trusted redirect; LOGIN SUPPRESSED")
 		}
-		return probeResult{}, errNoAuthenticationEvidence
+		return ProbeResult{}, ErrNoAuthenticationEvidence
 	}
-	if p.diagnostic != nil {
-		p.diagnostic.log.Printf("authentication gate: fresh probe failed and current trusted redirect=%q", safePortal(portal))
+	if diag != nil {
+		diag.Log.Printf("authentication gate: fresh probe failed and current trusted redirect=%q", SafePortal(portal))
 	}
-	return probeResult{redirect: portal, reason: fresh.reason}, nil
+	return ProbeResult{Redirect: portal, Reason: fresh.Reason}, nil
 }
 
-func (p *portalClient) discover(ctx context.Context) (string, error) {
+func (p *Client) discover(ctx context.Context) (string, error) {
 	for _, target := range []string{"http://9.9.9.9/", "http://neverssl.com/"} {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -226,13 +267,16 @@ func (p *portalClient) discover(ctx context.Context) (string, error) {
 	return "", errors.New("未收到校园网认证跳转")
 }
 
-func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP, currentMAC string) error {
-	if site != campusWenchang && site != campusNanhu {
+func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
+	if site != campus.Wenchang && site != campus.Nanhu {
 		return errors.New("校区未识别，不能发送账号密码")
 	}
-	if _, err := classifyPortal(portal); err != nil {
+	if _, err := campus.ClassifyPortal(portal); err != nil {
 		return err
 	}
+	p.mu.RLock()
+	cfg := p.cfg
+	p.mu.RUnlock()
 	// Both campuses use this backend. The a79 page is shared as well.
 	// Never derive a credential-bearing destination from an arbitrary redirect.
 	base, _ := url.Parse("http://10.2.5.251:801/eportal/")
@@ -253,7 +297,7 @@ func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP
 	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
 		return errors.New("没有可用的校园网 IPv4 地址")
 	}
-	account := p.cfg.accountFor(site)
+	account := cfg.AccountFor(site)
 	mac := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac"))
 	if len(mac) != 12 {
 		mac = strings.NewReplacer("-", "", ":", "").Replace(currentMAC)
@@ -263,7 +307,7 @@ func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP
 	}
 	params := url.Values{
 		"c": {"Portal"}, "a": {"login"}, "login_method": {"1"},
-		"user_account": {account}, "user_password": {p.cfg.password},
+		"user_account": {account}, "user_password": {cfg.Password},
 		"wlan_user_ip": {ip}, "wlan_user_mac": {mac},
 		"jsVersion": {"3.0"},
 	}
@@ -307,12 +351,42 @@ func (p *portalClient) login(ctx context.Context, site campus, portal, currentIP
 		msg = fmt.Sprint(result["message"])
 	}
 	if msg != "" && msg != "<nil>" {
-		return fmt.Errorf("认证未获成功响应（result=%v，ret_code=%v，msg=%s）", result["result"], result["ret_code"], msg)
+		return fmt.Errorf("认证未获成功响应（result=%v，ret_code=%v，msg=%s）", result["result"], result["ret_code"], decodePortalMessage(msg))
 	}
 	return fmt.Errorf("认证未获成功响应（result=%v，ret_code=%v）", result["result"], result["ret_code"])
 }
 
-func safePortal(raw string) string {
+func decodePortalMessage(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "<nil>" {
+		return ""
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) > 0 {
+		str := strings.TrimSpace(string(decoded))
+		printable := true
+		for _, r := range str {
+			if r < 32 && r != '\n' && r != '\r' && r != '\t' {
+				printable = false
+				break
+			}
+		}
+		if printable && str != "" {
+			switch str {
+			case "userid error1":
+				return fmt.Sprintf("%s (%s: 账号不存在或当前校区/运营商不匹配)", raw, str)
+			case "userid error2":
+				return fmt.Sprintf("%s (%s: 账号已停机或欠费)", raw, str)
+			case "password error":
+				return fmt.Sprintf("%s (%s: 密码错误)", raw, str)
+			default:
+				return fmt.Sprintf("%s (%s)", raw, str)
+			}
+		}
+	}
+	return raw
+}
+
+func SafePortal(raw string) string {
 	if raw == "" {
 		return ""
 	}

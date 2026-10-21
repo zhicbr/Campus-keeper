@@ -1,12 +1,14 @@
 //go:build windows
 
-package main
+package network
 
 import (
 	"fmt"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"wenchang-campus-keeper/internal/diagnostics"
 )
 
 var (
@@ -20,7 +22,7 @@ var (
 	wlanFreeMemory     = wlanAPI.NewProc("WlanFreeMemory")
 )
 
-const studentWiFiProfile = "CUMT_Stu"
+const StudentWiFiProfile = "CUMT_Stu"
 
 type wlanConnectionParameters struct {
 	mode         uint32
@@ -61,10 +63,10 @@ type wlanConnection struct {
 	association wlanAssociation
 }
 
-// requestSavedWiFi asks Windows to connect using an existing profile. The
-// request is asynchronous; IP acquisition is observed by monitorLink.
+// RequestSavedWiFi asks Windows to connect using an existing profile. The
+// request is asynchronous; IP acquisition is observed by MonitorLink.
 // A connected or connecting WLAN is never replaced by this program.
-func requestSavedWiFi(profile string, diagnostic *diagnostics) (string, error) {
+func RequestSavedWiFi(profile string, diagnostic *diagnostics.Diagnostics) (string, error) {
 	if err := wlanOpenHandle.Find(); err != nil {
 		return "", fmt.Errorf("Windows WLAN API 不可用：%w", err)
 	}
@@ -90,7 +92,7 @@ func requestSavedWiFi(profile string, diagnostic *diagnostics) (string, error) {
 	for i := uint32(0); i < count; i++ {
 		info := (*wlanInterfaceInfo)(unsafe.Pointer(base + uintptr(i)*unsafe.Sizeof(wlanInterfaceInfo{})))
 		if diagnostic != nil {
-			diagnostic.log.Printf("wifi native check guid=%x state=%d", info.guid, info.state)
+			diagnostic.Log.Printf("wifi native check guid=%x state=%d", info.guid, info.state)
 		}
 		switch info.state {
 		case 1: // connected: preserve whatever network the user selected.
@@ -112,11 +114,11 @@ func requestSavedWiFi(profile string, diagnostic *diagnostics) (string, error) {
 	}
 	params := wlanConnectionParameters{mode: 0, profile: name, bssType: 1} // profile, infrastructure
 	if diagnostic != nil {
-		diagnostic.log.Printf("WlanConnect CALL guid=%x profile=%q state=%d", disconnected.guid, profile, disconnected.state)
+		diagnostic.Log.Printf("WlanConnect CALL guid=%x profile=%q state=%d", disconnected.guid, profile, disconnected.state)
 	}
 	code, _, _ = wlanConnect.Call(handle, uintptr(unsafe.Pointer(&disconnected.guid)), uintptr(unsafe.Pointer(&params)), 0)
 	if diagnostic != nil {
-		diagnostic.log.Printf("WlanConnect RETURN code=%d", code)
+		diagnostic.Log.Printf("WlanConnect RETURN code=%d", code)
 	}
 	if code != 0 {
 		return "", fmt.Errorf("请求连接 Wi-Fi %s 失败：Windows 错误码 %d", profile, code)
@@ -124,9 +126,9 @@ func requestSavedWiFi(profile string, diagnostic *diagnostics) (string, error) {
 	return "已请求连接", nil
 }
 
-// reconnectSavedWiFi disconnects the current Wi-Fi association and reconnects to profile.
+// ReconnectSavedWiFi disconnects the current Wi-Fi association and reconnects to profile.
 // This is used to break out of a black-hole AP where the gateway is unreachable.
-func reconnectSavedWiFi(profile string, diagnostic *diagnostics) error {
+func ReconnectSavedWiFi(profile string, diagnostic *diagnostics.Diagnostics) error {
 	if err := wlanOpenHandle.Find(); err != nil {
 		return fmt.Errorf("Windows WLAN API 不可用：%w", err)
 	}
@@ -157,7 +159,7 @@ func reconnectSavedWiFi(profile string, diagnostic *diagnostics) error {
 		}
 	}
 	if target == nil {
-		_, err := requestSavedWiFi(profile, diagnostic)
+		_, err := RequestSavedWiFi(profile, diagnostic)
 		return err
 	}
 	name, err := syscall.UTF16PtrFromString(profile)
@@ -166,14 +168,14 @@ func reconnectSavedWiFi(profile string, diagnostic *diagnostics) error {
 	}
 	params := wlanConnectionParameters{mode: 0, profile: name, bssType: 1} // profile, infrastructure
 	if diagnostic != nil {
-		diagnostic.log.Printf("reconnectSavedWiFi DISCONNECT guid=%x profile=%q", target.guid, profile)
+		diagnostic.Log.Printf("reconnectSavedWiFi DISCONNECT guid=%x profile=%q", target.guid, profile)
 	}
 	if wlanDisconnect.Find() == nil {
 		wlanDisconnect.Call(handle, uintptr(unsafe.Pointer(&target.guid)), 0)
 	}
 	time.Sleep(500 * time.Millisecond)
 	if diagnostic != nil {
-		diagnostic.log.Printf("reconnectSavedWiFi CONNECT guid=%x profile=%q", target.guid, profile)
+		diagnostic.Log.Printf("reconnectSavedWiFi CONNECT guid=%x profile=%q", target.guid, profile)
 	}
 	code, _, _ = wlanConnect.Call(handle, uintptr(unsafe.Pointer(&target.guid)), uintptr(unsafe.Pointer(&params)), 0)
 	if code != 0 {
@@ -182,9 +184,9 @@ func reconnectSavedWiFi(profile string, diagnostic *diagnostics) error {
 	return nil
 }
 
-// connectedSSID calls the native WLAN API without launching netsh every few
+// ConnectedSSID calls the native WLAN API without launching netsh every few
 // seconds. Failure simply leaves Wi-Fi location inference unavailable.
-func connectedSSID() string {
+func ConnectedSSID() string {
 	if wlanOpenHandle.Find() != nil {
 		return ""
 	}

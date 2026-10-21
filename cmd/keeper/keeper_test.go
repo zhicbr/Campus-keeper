@@ -1,0 +1,166 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"wenchang-campus-keeper/internal/campus"
+	"wenchang-campus-keeper/internal/config"
+	"wenchang-campus-keeper/internal/network"
+	"wenchang-campus-keeper/internal/portal"
+)
+
+func TestSixAMResetBoundary(t *testing.T) {
+	china := time.FixedZone("Asia/Shanghai", 8*3600)
+	for _, tc := range []struct {
+		at, want string
+	}{
+		{"2026-09-30 05:59:59", "2026-09-30 06:00:00"},
+		{"2026-09-30 06:00:00", "2026-10-01 06:00:00"},
+		{"2026-09-30 23:59:59", "2026-10-01 06:00:00"},
+	} {
+		at, _ := time.ParseInLocation("2006-01-02 15:04:05", tc.at, china)
+		got := nextSix(at).In(china).Format("2006-01-02 15:04:05")
+		if got != tc.want {
+			t.Fatalf("nextSix(%s) = %s, want %s", tc.at, got, tc.want)
+		}
+	}
+	c := &controller{backoff: retryMax, nextReset: time.Now().Add(-time.Second), logger: log.New(io.Discard, "", 0)}
+	c.resetAtSixIfDue()
+	if c.backoff != retryBase {
+		t.Fatalf("06:00 reset left backoff at %s", c.backoff)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestCancelledCycleDoesNotProbeOrLogin(t *testing.T) {
+	p := portal.NewClient(config.Config{})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("request after cancellation")
+		return nil, nil
+	})})
+	c := &controller{portal: p}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.cycle(ctx, "exit"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestNetworkSwitchDropsCampusCredentialsContext(t *testing.T) {
+	c := &controller{
+		link:       network.LinkState{Index: 1, IPv4: "10.52.1.2"},
+		campus:     campus.Wenchang,
+		lastPortal: "http://10.2.5.251/a79.htm",
+		backoff:    retryMax,
+		nextRetry:  time.Now().Add(time.Minute),
+		retryTimer: time.NewTimer(time.Hour),
+	}
+	stopTimer(c.retryTimer)
+
+	newLink := network.LinkState{Index: 2, IPv4: "192.168.1.100"}
+	c.adoptLink(newLink)
+
+	if c.campus != "" {
+		t.Fatalf("expected campus to be reset, got %v", c.campus)
+	}
+	if c.lastPortal != "" {
+		t.Fatalf("expected lastPortal to be reset, got %v", c.lastPortal)
+	}
+	if !c.nextRetry.IsZero() {
+		t.Fatalf("expected nextRetry to be zero, got %v", c.nextRetry)
+	}
+	if !c.failureStart.IsZero() {
+		t.Fatalf("expected failureStart to be zero, got %v", c.failureStart)
+	}
+}
+
+func TestInitialFastRetryPeriodDoesNotBackoff(t *testing.T) {
+	c := &controller{
+		logger:     log.New(io.Discard, "", 0),
+		backoff:    retryBase,
+		retryTimer: time.NewTimer(time.Hour),
+	}
+	stopTimer(c.retryTimer)
+
+	// Simulate repeated failures within the first minute
+	for i := 0; i < 5; i++ {
+		c.scheduleRetry("failure")
+		if c.backoff != retryBase {
+			t.Fatalf("attempt %d: backoff grew to %v during initial fast retry window", i, c.backoff)
+		}
+		if time.Until(c.nextRetry) > retryBase+2*time.Second {
+			t.Fatalf("attempt %d: delay too large (%v) during fast retry window", i, time.Until(c.nextRetry))
+		}
+	}
+
+	// Simulate failure occurring after fastRetryWindow has passed
+	c.failureStart = time.Now().Add(-fastRetryWindow - 10*time.Second)
+	c.scheduleRetry("failure after 2min")
+	if c.backoff <= retryBase {
+		t.Fatalf("expected backoff to grow after fast retry window elapsed, got %v", c.backoff)
+	}
+}
+
+func TestWiFiFastRetryPeriod(t *testing.T) {
+	c := &controller{
+		logger:      log.New(io.Discard, "", 0),
+		wifiBackoff: retryBase,
+		wifiTimer:   time.NewTimer(time.Hour),
+	}
+	stopTimer(c.wifiTimer)
+
+	// In initial window, wifi backoff must not grow
+	for i := 0; i < 4; i++ {
+		c.scheduleWiFiRetry(true)
+		if c.wifiBackoff != retryBase {
+			t.Fatalf("attempt %d: wifiBackoff grew to %v during initial fast retry window", i, c.wifiBackoff)
+		}
+	}
+
+	// After fastRetryWindow elapsed, wifi backoff should double
+	c.wifiFailureStart = time.Now().Add(-fastRetryWindow - 10*time.Second)
+	c.scheduleWiFiRetry(true)
+	if c.wifiBackoff <= retryBase {
+		t.Fatalf("expected wifiBackoff to grow after fast retry window, got %v", c.wifiBackoff)
+	}
+}
+
+func TestManualReconnectResetsBackoff(t *testing.T) {
+	p := portal.NewClient(config.Config{})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("Microsoft Connect Test")), Header: make(http.Header)}, nil
+	})})
+
+	c := &controller{
+		portal:       p,
+		logger:       log.New(io.Discard, "", 0),
+		backoff:      retryMax,
+		nextRetry:    time.Now().Add(5 * time.Minute), // in backoff
+		failureStart: time.Now().Add(-10 * time.Minute),
+		retryTimer:   time.NewTimer(time.Hour),
+	}
+	stopTimer(c.retryTimer)
+
+	ctx := context.Background()
+	// Calling cycle with "手动重连" should clear nextRetry and succeed
+	err := c.cycle(ctx, "手动重连")
+	if err != nil {
+		t.Fatalf("manual reconnect failed: %v", err)
+	}
+	if !c.nextRetry.IsZero() {
+		t.Fatalf("expected nextRetry to be cleared on manual reconnect, got %v", c.nextRetry)
+	}
+	if c.backoff != retryBase {
+		t.Fatalf("expected backoff reset to retryBase, got %v", c.backoff)
+	}
+}

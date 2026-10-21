@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package ui
 
 import (
 	"encoding/json"
@@ -17,12 +17,15 @@ import (
 
 	webview2 "github.com/jchv/go-webview2"
 	"github.com/jchv/go-webview2/webviewloader"
+
+	"wenchang-campus-keeper/internal/config"
+	"wenchang-campus-keeper/internal/diagnostics"
 )
 
 const (
 	trayMessage   = 0x0401 // WM_USER + 1
 	statusMessage = 0x0402 // WM_USER + 2
-	wakeMessage   = 0x0404 // WM_USER + 4
+	WakeMessage   = 0x0404 // WM_USER + 4
 
 	nifMessageIconTip = 0x0007
 	nimAdd            = 0x00000000
@@ -132,15 +135,15 @@ type notifyIconData struct {
 	balloonIcon uintptr
 }
 
-type dashboardInfo struct {
-	status   string
-	network  string
-	operator string
-	ip       string
-	isCampus bool
+type DashboardInfo struct {
+	Status   string
+	Network  string
+	Operator string
+	IP       string
+	IsCampus bool
 }
 
-type trayUI struct {
+type TrayUI struct {
 	mu            sync.Mutex
 	wvOnce        sync.Once
 	wvReady       chan struct{}
@@ -151,18 +154,18 @@ type trayUI struct {
 	windowVisible bool
 	uiRendered    bool
 	pendingTab    string
-	dash          dashboardInfo
+	dash          DashboardInfo
 	logText       string
 	currentIcon   uintptr
 
 	quit         func()
 	onReconnect  func()
-	getConfig    func() config
-	onSaveConfig func(config)
+	getConfig    func() config.Config
+	onSaveConfig func(config.Config)
 	done         chan struct{}
 }
 
-func (t *trayUI) setWindowIcons(hwnd uintptr) {
+func (t *TrayUI) setWindowIcons(hwnd uintptr) {
 	if hwnd == 0 {
 		return
 	}
@@ -205,6 +208,7 @@ func initDpiAwareness() {
 	}
 }
 
+
 func setWndProc(hwnd uintptr, newProc uintptr) uintptr {
 	if setWindowLongPtr.Find() == nil {
 		res, _, _ := setWindowLongPtr.Call(hwnd, uintptr(^uintptr(3)), newProc) // GWLP_WNDPROC = -4
@@ -221,11 +225,11 @@ func applyModernWindowAttributes(hwnd uintptr) {
 	}
 }
 
-func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveConfig func(config), showConsole bool) (*trayUI, error) {
-	t := &trayUI{
-		dash: dashboardInfo{
-			status:  "检测中",
-			network: "检测中",
+func StartTray(quit func(), onReconnect func(), getConfig func() config.Config, onSaveConfig func(config.Config), showConsole bool) (*TrayUI, error) {
+	t := &TrayUI{
+		dash: DashboardInfo{
+			Status:  "检测中",
+			Network: "检测中",
 		},
 		quit:         quit,
 		onReconnect:  onReconnect,
@@ -246,17 +250,16 @@ func startTray(quit func(), onReconnect func(), getConfig func() config, onSaveC
 		go t.ensureWebview("logs")
 	}
 
-	setConsoleWriter(t)
+	diagnostics.SetConsoleWriter(t)
 	return t, nil
 }
 
-func (t *trayUI) trayLoop(ready chan<- error) {
+func (t *TrayUI) trayLoop(ready chan<- error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	defer close(t.done)
 
 	instance, _, _ := getModuleHandle.Call(0)
-	trayClassName := syscall.StringToUTF16Ptr("WenchangCampusKeeperTray")
+	trayClassName, _ := syscall.UTF16PtrFromString("WenchangCampusKeeperTray")
 
 	trayCallback := syscall.NewCallback(func(hwnd, message, wparam, lparam uintptr) uintptr {
 		switch uint32(message) {
@@ -271,8 +274,8 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 		case statusMessage:
 			t.updateIcon(nimModify)
 			return 0
-		case wakeMessage:
-			if t.getConfig != nil && !t.getConfig().valid() {
+		case WakeMessage:
+			if t.getConfig != nil && !t.getConfig().Valid() {
 				t.openSettings()
 			} else {
 				t.showConsole()
@@ -335,9 +338,10 @@ func (t *trayUI) trayLoop(ready chan<- error) {
 	if icon != 0 {
 		destroyIcon.Call(icon)
 	}
+	close(t.done)
 }
 
-func (t *trayUI) webviewLoop(ready chan struct{}) {
+func (t *TrayUI) webviewLoop(ready chan struct{}) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -346,14 +350,14 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 		return
 	}
 
-	wvDataDir := filepath.Join(appDataDir(), "wv2")
+	wvDataDir := filepath.Join(config.AppDataDir(), "wv2")
 	_ = os.MkdirAll(wvDataDir, 0755)
 
 	wv := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:    false,
 		DataPath: wvDataDir,
 		WindowOptions: webview2.WindowOptions{
-			Title:  "CampusKeeper",
+			Title:  "CampusKeeper v" + config.AppVersion,
 			Width:  680,
 			Height: 560,
 			Center: true,
@@ -366,7 +370,7 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 	}
 
 	hwndWebview := uintptr(wv.Window())
-	// Hide immediately to prevent unrendered blank frame
+	// Hide immediately to keep background clean
 	showWindow.Call(hwndWebview, 0) // SW_HIDE
 
 	t.mu.Lock()
@@ -396,22 +400,22 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 
 	// Bind Go RPC methods
 	wv.Bind("saveConfig", func(account, password, opStr string) (bool, error) {
-		op := operatorCMCC
+		op := config.OperatorCMCC
 		switch opStr {
 		case "移动", "中国移动":
-			op = operatorCMCC
+			op = config.OperatorCMCC
 		case "电信", "中国电信":
-			op = operatorTelecom
+			op = config.OperatorTelecom
 		case "联通", "中国联通":
-			op = operatorUnicom
+			op = config.OperatorUnicom
 		case "校园网":
-			op = operatorCampus
+			op = config.OperatorCampus
 		}
 		if t.onSaveConfig != nil {
-			go t.onSaveConfig(config{
-				account:  account,
-				password: password,
-				operator: op,
+			go t.onSaveConfig(config.Config{
+				Account:  account,
+				Password: password,
+				Operator: op,
 			})
 		}
 		return true, nil
@@ -425,7 +429,7 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 	})
 
 	wv.Bind("openDataDir", func() (bool, error) {
-		dir := appDataDir()
+		dir := config.AppDataDir()
 		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
 		return true, nil
 	})
@@ -439,9 +443,9 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 		var res jsConfig
 		if t.getConfig != nil {
 			cfg := t.getConfig()
-			res.Account = cfg.account
-			res.Password = cfg.password
-			res.Operator = cfg.operatorName()
+			res.Account = cfg.Account
+			res.Password = cfg.Password
+			res.Operator = cfg.OperatorName()
 		}
 		return res, nil
 	})
@@ -457,11 +461,11 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		return jsDashboard{
-			Status:   t.dash.status,
-			Network:  t.dash.network,
-			Operator: t.dash.operator,
-			IP:       t.dash.ip,
-			IsCampus: t.dash.isCampus,
+			Status:   t.dash.Status,
+			Network:  t.dash.Network,
+			Operator: t.dash.Operator,
+			IP:       t.dash.IP,
+			IsCampus: t.dash.IsCampus,
 		}, nil
 	})
 
@@ -496,7 +500,7 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 		return true, nil
 	})
 
-	wv.SetHtml(appHTML)
+	wv.SetHtml(GetAppHTML())
 	close(ready)
 
 	// WebView2 dedicated message loop
@@ -512,7 +516,7 @@ func (t *trayUI) webviewLoop(ready chan struct{}) {
 	t.mu.Unlock()
 }
 
-func (t *trayUI) ensureWebview(targetTab string) {
+func (t *TrayUI) ensureWebview(targetTab string) {
 	t.wvOnce.Do(func() {
 		t.wvReady = make(chan struct{})
 		go t.webviewLoop(t.wvReady)
@@ -523,7 +527,7 @@ func (t *trayUI) ensureWebview(targetTab string) {
 	t.showWindowWithTab(targetTab)
 }
 
-func (t *trayUI) showWindowWithTab(tab string) {
+func (t *TrayUI) showWindowWithTab(tab string) {
 	t.mu.Lock()
 	wv := t.wv
 	hwnd := t.hwndWebview
@@ -544,7 +548,7 @@ func (t *trayUI) showWindowWithTab(tab string) {
 	})
 }
 
-func (t *trayUI) hideWindow() {
+func (t *TrayUI) hideWindow() {
 	t.mu.Lock()
 	hwnd := t.hwndWebview
 	t.windowVisible = false
@@ -554,7 +558,7 @@ func (t *trayUI) hideWindow() {
 	}
 }
 
-func (t *trayUI) toggleWindow() {
+func (t *TrayUI) toggleWindow() {
 	t.mu.Lock()
 	wv := t.wv
 	hwnd := t.hwndWebview
@@ -572,7 +576,7 @@ func (t *trayUI) toggleWindow() {
 	}
 }
 
-func (t *trayUI) openSettings() {
+func (t *TrayUI) openSettings() {
 	t.mu.Lock()
 	wv := t.wv
 	t.mu.Unlock()
@@ -583,7 +587,7 @@ func (t *trayUI) openSettings() {
 	}
 }
 
-func (t *trayUI) showConsole() {
+func (t *TrayUI) showConsole() {
 	t.mu.Lock()
 	wv := t.wv
 	t.mu.Unlock()
@@ -594,14 +598,14 @@ func (t *trayUI) showConsole() {
 	}
 }
 
-func (t *trayUI) updateDashboard(status, network, operator, ip string, isCampus bool) {
+func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus bool) {
 	t.mu.Lock()
-	t.dash = dashboardInfo{
-		status:   status,
-		network:  network,
-		operator: operator,
-		ip:       ip,
-		isCampus: isCampus,
+	t.dash = DashboardInfo{
+		Status:   status,
+		Network:  network,
+		Operator: operator,
+		IP:       ip,
+		IsCampus: isCampus,
 	}
 	wv := t.wv
 	hwndTray := t.hwndTray
@@ -625,7 +629,7 @@ func (t *trayUI) updateDashboard(status, network, operator, ip string, isCampus 
 	}
 }
 
-func (t *trayUI) updateIcon(action uint32) bool {
+func (t *TrayUI) updateIcon(action uint32) bool {
 	t.mu.Lock()
 	hwnd := t.hwndTray
 	dash := t.dash
@@ -636,18 +640,18 @@ func (t *trayUI) updateIcon(action uint32) bool {
 		return false
 	}
 
-	var kind iconKind
-	if dash.isCampus {
-		kind = iconCampusOnline
-	} else if strings.Contains(dash.status, "正常") || strings.Contains(dash.status, "已连接") {
-		kind = iconExternalOnline
-	} else if strings.Contains(dash.status, "重试") || strings.Contains(dash.status, "认证中") || strings.Contains(dash.status, "正在") {
-		kind = iconConnecting
+	var kind IconKind
+	if dash.IsCampus {
+		kind = IconCampusOnline
+	} else if strings.Contains(dash.Status, "正常") || strings.Contains(dash.Status, "已连接") {
+		kind = IconExternalOnline
+	} else if strings.Contains(dash.Status, "重试") || strings.Contains(dash.Status, "认证中") || strings.Contains(dash.Status, "正在") {
+		kind = IconConnecting
 	} else {
-		kind = iconOffline
+		kind = IconOffline
 	}
 
-	newIcon := createShieldIcon(kind)
+	newIcon := CreateShieldIcon(kind)
 	t.mu.Lock()
 	t.currentIcon = newIcon
 	t.mu.Unlock()
@@ -671,12 +675,12 @@ func (t *trayUI) updateIcon(action uint32) bool {
 	hwndWebview := t.hwndWebview
 	t.mu.Unlock()
 	if hwndWebview != 0 && newIcon != 0 {
-		sendMessage.Call(hwndWebview, wmSetIcon, iconSmall, newIcon)
+		postMessage.Call(hwndWebview, wmSetIcon, iconSmall, newIcon)
 	}
 	return res != 0
 }
 
-func (t *trayUI) popupMenu() {
+func (t *TrayUI) popupMenu() {
 	menu, _, _ := createPopupMenu.Call()
 	if menu == 0 {
 		return
@@ -693,13 +697,13 @@ func (t *trayUI) popupMenu() {
 	}
 
 	// 1. Dashboard Status (High contrast, clickable)
-	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.status))))
-	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("网络："+dash.network))))
-	if dash.isCampus && dash.operator != "" {
-		appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商："+dash.operator))))
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.Status))))
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("网络："+dash.Network))))
+	if dash.IsCampus && dash.Operator != "" {
+		appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运营商："+dash.Operator))))
 	}
-	if dash.ip != "" {
-		appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("地址："+dash.ip))))
+	if dash.IP != "" {
+		appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("地址："+dash.IP))))
 	}
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 
@@ -727,18 +731,41 @@ func (t *trayUI) popupMenu() {
 	case menuCmdLogs:
 		t.showConsole()
 	case menuCmdOpenDir:
-		dir := appDataDir()
+		dir := config.AppDataDir()
 		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
 	case menuCmdExit:
-		t.close()
-		if t.quit != nil {
-			t.quit()
+		t.mu.Lock()
+		hwnd := t.hwndTray
+		wv := t.wv
+		hwndWebview := t.hwndWebview
+		oldWndProc := t.oldWndProc
+		quit := t.quit
+		t.mu.Unlock()
+
+		diagnostics.SetConsoleWriter(io.Discard)
+		if hwnd != 0 {
+			var data notifyIconData
+			data.size = uint32(unsafe.Sizeof(data))
+			data.hwnd = hwnd
+			data.id = 1
+			shellNotifyIcon.Call(uintptr(nimDelete), uintptr(unsafe.Pointer(&data)))
+		}
+		if hwndWebview != 0 && oldWndProc != 0 {
+			setWndProc(hwndWebview, oldWndProc)
+		}
+		if wv != nil {
+			wv.Dispatch(func() {
+				wv.Destroy()
+			})
+		}
+		if quit != nil {
+			quit()
 		}
 		os.Exit(0)
 	}
 }
 
-func (t *trayUI) Write(p []byte) (int, error) {
+func (t *TrayUI) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	chunk := string(p)
 	t.logText += chunk
@@ -761,8 +788,8 @@ func (t *trayUI) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (t *trayUI) close() {
-	setConsoleWriter(io.Discard)
+func (t *TrayUI) Close() {
+	diagnostics.SetConsoleWriter(io.Discard)
 	t.mu.Lock()
 	hwndTray := t.hwndTray
 	wv := t.wv
@@ -779,7 +806,11 @@ func (t *trayUI) close() {
 		})
 	}
 	if hwndTray != 0 {
+		var data notifyIconData
+		data.size = uint32(unsafe.Sizeof(data))
+		data.hwnd = hwndTray
+		data.id = 1
+		shellNotifyIcon.Call(uintptr(nimDelete), uintptr(unsafe.Pointer(&data)))
 		postMessage.Call(hwndTray, wmClose, 0, 0)
 	}
-	<-t.done
 }

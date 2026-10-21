@@ -34,7 +34,7 @@ Start-Process .\wenchang-campus-keeper.exe
 完成本机断网验证后，在当前用户的 PowerShell 运行：
 
 ```powershell
-.\install-task.ps1 -StartNow
+.\scripts\install-task.ps1 -StartNow
 ```
 
 这会创建 `WenchangCampusKeeper` 计划任务，在当前用户登录 Windows 后运行并显示托盘图标；程序异常退出时任务尝试重启，每天 06:05 还有一次补启动触发。后台使用 `-quiet`，仅记录状态变化和操作，减少日志量。托盘图标需要该用户保持登录。
@@ -45,13 +45,20 @@ Start-Process .\wenchang-campus-keeper.exe
 
 日志写在同目录 `keeper.log`，达到 5 MiB 后归档为带时间戳的文件，不自动永久删除。`.env`、日志、可执行文件和缓存均已加入 `.gitignore`。
 
-## 构建
+## 构建与版本管理
+
+程序的版本号统一在根目录的 `VERSION` 文件中维护（只需修改其中的纯文本版本号，无需改动任何 Go 代码）：
 
 ```powershell
-go test -buildvcs=false .
-go build -buildvcs=false -ldflags="-H=windowsgui -s -w" -o .\wenchang-campus-keeper.exe .
+# 方式一：一键自动构建（自动读取 VERSION 并注入编译）
+.\build.ps1
+
+# 方式二：标准命令行手动构建
+$version = (Get-Content .\VERSION -Raw).Trim()
+go test ./...
+go build -buildvcs=false -ldflags="-H=windowsgui -s -w -X 'wenchang-campus-keeper/internal/config.AppVersion=$version'" -o .\wenchang-campus-keeper.exe .\cmd\keeper
 ```
 
 > **注意**：必须使用 `-ldflags="-H=windowsgui"` 参数将程序标记为 Windows GUI 子系统，否则双击运行时 Windows 会自动附带弹出黑色控制台终端窗口。
 
-Go 代码只依赖标准库。南湖请求根据原 `clogin.bat` 实现；该脚本不再参与运行。明天到南湖后需由用户现场验证实际认证跳转及登录结果，详见 [DESIGN.md](DESIGN.md)。
+Go 代码只依赖标准库。南湖请求根据原 `clogin.bat` 实现；该脚本不再参与运行。明天到南湖后需由用户现场验证实际认证跳转及登录结果，详见 [DESIGN.md](docs/DESIGN.md)。

@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package diagnostics
 
 import (
 	"context"
@@ -25,24 +25,30 @@ import (
 
 // Diagnostics observe independently of the controller, including while login
 // blocks. They never submit credentials or change routes/WLAN configuration.
-type diagnostics struct {
-	log      *log.Logger
-	writer   *rotatingLog
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	wake     chan string
-	sequence atomic.Uint64
+type Diagnostics struct {
+	Log         *log.Logger
+	Writer      *RotatingLog
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	wake        chan string
+	sequence    atomic.Uint64
+	linkSampler func() (ifIndex int, ipv4 string, gateway string)
 }
 
-func startDiagnostics(parent context.Context, dir string, operational *log.Logger) (*diagnostics, error) {
-	w, err := newRotatingLog(filepath.Join(dir, "network-diagnostic.log"), 32<<20)
+func StartDiagnostics(parent context.Context, dir string, operational *log.Logger) (*Diagnostics, error) {
+	w, err := NewRotatingLog(filepath.Join(dir, "network-diagnostic.log"), 32<<20)
 	if err != nil {
 		return nil, err
 	}
-	w.silent = true
+	w.Silent = true
 	ctx, cancel := context.WithCancel(parent)
-	d := &diagnostics{log: log.New(w, "", log.Ldate|log.Ltime|log.Lmicroseconds), writer: w, cancel: cancel, wake: make(chan string, 32)}
-	d.log.Printf("SESSION START pid=%d go=%s build=%s timezone=%s interval: probes=5s snapshot=15s events=30s; normal recovery enabled", os.Getpid(), runtime.Version(), diagnosticBuild, time.Now().Format("-0700"))
+	d := &Diagnostics{
+		Log:    log.New(w, "", log.Ldate|log.Ltime|log.Lmicroseconds),
+		Writer: w,
+		cancel: cancel,
+		wake:   make(chan string, 32),
+	}
+	d.Log.Printf("SESSION START pid=%d go=%s build=%s timezone=%s interval: probes=5s snapshot=15s events=30s; normal recovery enabled", os.Getpid(), runtime.Version(), diagnosticBuild, time.Now().Format("-0700"))
 	operational.Print("持续网络诊断已开启：network-diagnostic.log（32 MiB 分卷，历史日志保留）；正常使用及开关 VPN 即可")
 	d.wg.Add(4)
 	go func() { defer d.wg.Done(); d.probes(ctx) }()
@@ -52,86 +58,93 @@ func startDiagnostics(parent context.Context, dir string, operational *log.Logge
 	return d, nil
 }
 
-var diagnosticBuild = "development"
-
-func (d *diagnostics) close() {
-	d.cancel()
-	d.wg.Wait()
-	d.log.Print("SESSION END")
-	d.writer.Close()
+func (d *Diagnostics) SetLinkSampler(sampler func() (ifIndex int, ipv4 string, gateway string)) {
+	d.linkSampler = sampler
 }
 
-func (d *diagnostics) trigger(reason string) {
-	d.log.Printf("snapshot requested reason=%q", reason)
+var diagnosticBuild = "development"
+
+func (d *Diagnostics) Close() {
+	d.cancel()
+	d.wg.Wait()
+	d.Log.Print("SESSION END")
+	d.Writer.Close()
+}
+
+func (d *Diagnostics) Trigger(reason string) {
+	d.Log.Printf("snapshot requested reason=%q", reason)
 	select {
 	case d.wake <- reason:
 	default:
-		d.log.Printf("snapshot queue full reason=%q; periodic snapshots remain active", reason)
+		d.Log.Printf("snapshot queue full reason=%q; periodic snapshots remain active", reason)
 	}
 }
 
-// url.Error includes credential-bearing request URLs. Unwrap before logging;
+// DiagnosticError unwraps credential-bearing request URLs. Unwrap before logging;
 // neither request bodies, query strings nor authentication responses are logged.
-func diagnosticError(err error) string {
+func DiagnosticError(err error) string {
 	if err == nil {
 		return ""
 	}
 	var u *url.Error
 	if errors.As(err, &u) {
-		return diagnosticError(u.Err)
+		return DiagnosticError(u.Err)
 	}
 	return fmt.Sprintf("%T: %s", err, err.Error())
 }
 
-func (d *diagnostics) request(client *http.Client, r *http.Request, label string) (*http.Response, error) {
+func SafePortal(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid>"
+	}
+	return u.Scheme + "://" + u.Host + u.Path
+}
+
+func (d *Diagnostics) Request(client *http.Client, r *http.Request, label string) (*http.Response, error) {
 	id := d.sequence.Add(1)
 	started := time.Now()
-	target := safePortal(r.URL.String())
-	d.log.Printf("http begin id=%d kind=%q target=%q", id, label, target)
+	target := SafePortal(r.URL.String())
+	d.Log.Printf("http begin id=%d kind=%q target=%q", id, label, target)
 	trace := &httptrace.ClientTrace{
-		DNSStart: func(i httptrace.DNSStartInfo) { d.log.Printf("http dns-start id=%d host=%q", id, i.Host) },
+		DNSStart: func(i httptrace.DNSStartInfo) { d.Log.Printf("http dns-start id=%d host=%q", id, i.Host) },
 		DNSDone: func(i httptrace.DNSDoneInfo) {
-			d.log.Printf("http dns-done id=%d addresses=%v coalesced=%t error=%q elapsed=%s", id, i.Addrs, i.Coalesced, diagnosticError(i.Err), time.Since(started))
+			d.Log.Printf("http dns-done id=%d addresses=%v coalesced=%t error=%q elapsed=%s", id, i.Addrs, i.Coalesced, DiagnosticError(i.Err), time.Since(started))
 		},
 		ConnectStart: func(network, address string) {
-			d.log.Printf("http connect-start id=%d network=%q address=%q", id, network, address)
+			d.Log.Printf("http connect-start id=%d network=%q address=%q", id, network, address)
 		},
 		ConnectDone: func(network, address string, err error) {
-			d.log.Printf("http connect-done id=%d network=%q address=%q error=%q elapsed=%s", id, network, address, diagnosticError(err), time.Since(started))
+			d.Log.Printf("http connect-done id=%d network=%q address=%q error=%q elapsed=%s", id, network, address, DiagnosticError(err), time.Since(started))
 		},
-		GotConn: func(i httptrace.GotConnInfo) {
-			d.log.Printf("http connected id=%d local=%q remote=%q reused=%t", id, i.Conn.LocalAddr().String(), i.Conn.RemoteAddr().String(), i.Reused)
-		},
-		TLSHandshakeStart: func() { d.log.Printf("http tls-start id=%d", id) },
-		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
-			d.log.Printf("http tls-done id=%d version=%d error=%q elapsed=%s", id, state.Version, diagnosticError(err), time.Since(started))
+		TLSHandshakeStart: func() { d.Log.Printf("http tls-start id=%d", id) },
+		TLSHandshakeDone: func(s tls.ConnectionState, err error) {
+			d.Log.Printf("http tls-done id=%d version=%x cipher=%x error=%q elapsed=%s", id, s.Version, s.CipherSuite, DiagnosticError(err), time.Since(started))
 		},
 		WroteRequest: func(i httptrace.WroteRequestInfo) {
-			d.log.Printf("http request-written id=%d error=%q elapsed=%s", id, diagnosticError(i.Err), time.Since(started))
+			d.Log.Printf("http wrote id=%d error=%q elapsed=%s", id, DiagnosticError(i.Err), time.Since(started))
 		},
-		GotFirstResponseByte: func() { d.log.Printf("http first-byte id=%d elapsed=%s", id, time.Since(started)) },
+		GotFirstResponseByte: func() {
+			d.Log.Printf("http ttfb id=%d elapsed=%s", id, time.Since(started))
+		},
 	}
-	r = r.WithContext(httptrace.WithClientTrace(r.Context(), trace))
-	resp, err := client.Do(r)
-	status, redirect := 0, ""
+	resp, err := client.Do(r.WithContext(httptrace.WithClientTrace(r.Context(), trace)))
+	status := 0
+	redirect := ""
 	if resp != nil {
 		status = resp.StatusCode
-		if location, e := resp.Location(); e == nil {
-			redirect = safePortal(location.String())
+		if location, locErr := resp.Location(); locErr == nil {
+			redirect = SafePortal(location.String())
 		}
 	}
-	d.log.Printf("http end id=%d kind=%q target=%q status=%d redirect=%q error=%q elapsed=%s", id, label, target, status, redirect, diagnosticError(err), time.Since(started))
+	d.Log.Printf("http end id=%d kind=%q target=%q status=%d redirect=%q error=%q elapsed=%s", id, label, target, status, redirect, DiagnosticError(err), time.Since(started))
 	return resp, err
 }
 
-func (p *portalClient) doDiagnostic(r *http.Request, label string) (*http.Response, error) {
-	if p.diagnostic == nil {
-		return p.client.Do(r)
-	}
-	return p.diagnostic.request(p.client, r, label)
-}
-
-func (d *diagnostics) probes(ctx context.Context) {
+func (d *Diagnostics) probes(ctx context.Context) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // Observe OS routes/TUN, without silently using an environment proxy.
 	transport.DisableKeepAlives = true
@@ -145,17 +158,17 @@ func (d *diagnostics) probes(ctx context.Context) {
 			return
 		}
 		var jobs sync.WaitGroup
-		link := readLink(linkState{})
-		d.log.Printf("independent link sample link=%+v", link)
-		if link.ready() {
-			gateway, mac, err := gatewayFingerprint(link.index)
-			d.log.Printf("gateway sample ifindex=%d gateway=%q mac=%q error=%q", link.index, gateway, mac, diagnosticError(err))
-			if gateway != "" {
-				jobs.Add(1)
-				go func() {
-					defer jobs.Done()
-					d.command(ctx, "campus-gateway-ping", 4*time.Second, "ping.exe", "-4", "-S", link.ipv4, "-n", "1", "-w", "1500", gateway)
-				}()
+		if d.linkSampler != nil {
+			ifIndex, ipv4, gateway := d.linkSampler()
+			if ifIndex != 0 && ipv4 != "" {
+				d.Log.Printf("independent link sample ifindex=%d ipv4=%s gateway=%s", ifIndex, ipv4, gateway)
+				if gateway != "" {
+					jobs.Add(1)
+					go func() {
+						defer jobs.Done()
+						d.command(ctx, "campus-gateway-ping", 4*time.Second, "ping.exe", "-4", "-S", ipv4, "-n", "1", "-w", "1500", gateway)
+					}()
+				}
 			}
 		}
 		for _, host := range []string{"www.baidu.com", "www.google.com"} {
@@ -163,14 +176,14 @@ func (d *diagnostics) probes(ctx context.Context) {
 			go func(host string) {
 				defer jobs.Done()
 				r, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/", nil)
-				resp, err := d.request(client, r, "system-route-https")
+				resp, err := d.Request(client, r, "system-route-https")
 				if resp != nil {
 					_, bodyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 					resp.Body.Close()
-					d.log.Printf("system https body host=%q error=%q", host, diagnosticError(bodyErr))
+					d.Log.Printf("system https body host=%q error=%q", host, DiagnosticError(bodyErr))
 				}
 				if err != nil && ctx.Err() == nil {
-					d.log.Printf("system target failed host=%q (not a login trigger)", host)
+					d.Log.Printf("system target failed host=%q (not a login trigger)", host)
 				}
 			}(host)
 			jobs.Add(1)
@@ -190,14 +203,14 @@ func (d *diagnostics) probes(ctx context.Context) {
 
 // Powershell emits UTF-8, but native ping/netsh can use the OEM code page.
 // Keep their original bytes in quoted output rather than guessing the encoding.
-func (d *diagnostics) command(ctx context.Context, label string, timeout time.Duration, name string, args ...string) error {
+func (d *Diagnostics) command(ctx context.Context, label string, timeout time.Duration, name string, args ...string) error {
 	child, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
 	cmd := exec.CommandContext(child, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
-	d.log.Printf("command kind=%q elapsed=%s error=%q context=%q bytes=%d output=%q", label, time.Since(start), diagnosticError(err), diagnosticError(child.Err()), len(out), string(out))
+	d.Log.Printf("command kind=%q elapsed=%s error=%q context=%q bytes=%d output=%q", label, time.Since(start), DiagnosticError(err), DiagnosticError(child.Err()), len(out), string(out))
 	return err
 }
 
@@ -262,7 +275,7 @@ foreach ($hostName in 'www.baidu.com','www.google.com') {
 }
 `
 
-func (d *diagnostics) proxyProbes(ctx context.Context) {
+func (d *Diagnostics) proxyProbes(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -278,7 +291,7 @@ func (d *diagnostics) proxyProbes(ctx context.Context) {
 	}
 }
 
-func (d *diagnostics) snapshots(ctx context.Context) {
+func (d *Diagnostics) snapshots(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	reason := "startup"
@@ -286,7 +299,7 @@ func (d *diagnostics) snapshots(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		d.log.Printf("snapshot begin reason=%q", reason)
+		d.Log.Printf("snapshot begin reason=%q", reason)
 		d.command(ctx, "windows-snapshot", 12*time.Second, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", snapshotScript)
 		select {
 		case <-ctx.Done():
@@ -302,7 +315,7 @@ func (d *diagnostics) snapshots(ctx context.Context) {
 	}
 }
 
-func (d *diagnostics) events(ctx context.Context) {
+func (d *Diagnostics) events(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	// Each session owns an append-only export. Duplicates across sessions are

@@ -11,13 +11,10 @@ network-diagnostics-*.zip
 .go-cache/
 .go-mod-cache/
 portal-*
+logs/
+.diagnostic-smoke/
 
-# Investigation records and scratch scripts
-Collect-Diagnostics.ps1
-DIAGNOSTICS.md
-FIX-*.md
-INCIDENT-*.md
-ISSUES.md
-REGRESSION-*.md
-analyze_incident.py
-regression_audit.py
+# Investigation records and scratch scripts (完全忽略的排查记录与临时脚本)
+docs/incidents/
+scripts/Collect-Diagnostics.ps1
+scripts/tools/

@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package campus
 
 import (
 	"bytes"
@@ -12,14 +12,15 @@ import (
 )
 
 var (
+	ipHelper          = syscall.NewLazyDLL("iphlpapi.dll")
 	getIPForwardTable = ipHelper.NewProc("GetIpForwardTable")
 	getIPNetTable     = ipHelper.NewProc("GetIpNetTable")
 )
 
-// gatewayFingerprint reads only the Windows IPv4 route and neighbor tables.
+// GatewayFingerprint reads only the Windows IPv4 route and neighbor tables.
 // It never probes or changes the network. The result belongs to ifIndex, not
 // necessarily to the operating system's preferred default route.
-func gatewayFingerprint(ifIndex int) (string, string, error) {
+func GatewayFingerprint(ifIndex int) (string, string, error) {
 	routes, err := readIPHelperTable(getIPForwardTable)
 	if err != nil {
 		return "", "", err
