@@ -59,6 +59,7 @@ func TestCancelledCycleDoesNotProbeOrLogin(t *testing.T) {
 func TestNetworkSwitchDropsCampusCredentialsContext(t *testing.T) {
 	c := &controller{
 		link:       network.LinkState{Index: 1, IPv4: "10.52.1.2"},
+		state:      "online",
 		campus:     campus.Wenchang,
 		lastPortal: "http://10.2.5.251/a79.htm",
 		backoff:    retryMax,
@@ -69,6 +70,9 @@ func TestNetworkSwitchDropsCampusCredentialsContext(t *testing.T) {
 
 	newLink := network.LinkState{Index: 2, IPv4: "192.168.1.100"}
 	c.adoptLink(newLink)
+	if c.state != "checking" {
+		t.Fatalf("switch retained old online status: %q", c.state)
+	}
 
 	if c.campus != "" {
 		t.Fatalf("expected campus to be reset, got %v", c.campus)
@@ -81,6 +85,58 @@ func TestNetworkSwitchDropsCampusCredentialsContext(t *testing.T) {
 	}
 	if !c.failureStart.IsZero() {
 		t.Fatalf("expected failureStart to be zero, got %v", c.failureStart)
+	}
+}
+
+func TestProbeResultBelongsToCurrentNetwork(t *testing.T) {
+	old := network.LinkState{Index: 1, Up: true, IPv4: "10.52.1.2"}
+	if !probeLinkCurrent(old, old) {
+		t.Fatal("same ready network rejected")
+	}
+	if probeLinkCurrent(old, network.LinkState{Index: 2, Up: true, IPv4: "192.168.1.2"}) {
+		t.Fatal("probe result accepted after network switch")
+	}
+	if probeLinkCurrent(old, network.LinkState{Index: 1, IPv4: "10.52.1.2"}) {
+		t.Fatal("probe result accepted after link went down")
+	}
+}
+
+func TestStaleProbeSchedulesCheckWhenMonitorEventIsSkipped(t *testing.T) {
+	old := network.LinkState{Index: 1, Up: true, IPv4: "10.52.1.2"}
+	newLink := network.LinkState{Index: 2, Up: true, IPv4: "10.3.1.2"}
+	c := &controller{link: old, state: "online", linkRecheck: make(chan struct{}, 1)}
+	c.adoptLink(newLink) // verifyProbeLink already observed the switch
+	if err := c.acceptProbeLink(old); err == nil {
+		t.Fatal("old probe result was accepted")
+	}
+	if err := c.acceptProbeLink(old); err == nil {
+		t.Fatal("repeated old probe result was accepted")
+	}
+	if len(c.linkRecheck) != 1 {
+		t.Fatalf("got %d queued checks, want one", len(c.linkRecheck))
+	}
+	if newLink != c.link {
+		t.Fatal("monitor event would not be skipped in this scenario")
+	}
+	select {
+	case <-c.linkRecheck:
+		// The run loop can check the new link immediately despite the skipped event.
+	default:
+		t.Fatal("new network check was not scheduled")
+	}
+}
+
+func TestRecoveryStatesHaveDistinctDescriptions(t *testing.T) {
+	for state, want := range map[string]string{
+		"checking":        "检测中",
+		"offline":         "未连接",
+		"authenticating":  "正在认证",
+		"retry-wait":      "等待重试",
+		"config-required": "需要配置账号",
+	} {
+		if got := stateName(state); got != want {
+			t.Errorf("stateName(%q) = %q, want %q", state, got, want)
+		}
 	}
 }
 

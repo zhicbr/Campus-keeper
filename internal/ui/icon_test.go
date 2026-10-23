@@ -23,6 +23,31 @@ func TestCreateShieldIcons(t *testing.T) {
 	}
 }
 
+func TestIconKindForState(t *testing.T) {
+	tests := []struct {
+		state  string
+		campus bool
+		want   IconKind
+	}{
+		{"online", true, IconCampusOnline},
+		{"online", false, IconExternalOnline},
+		{"offline", true, IconOffline},
+		{"link-down", true, IconOffline},
+		{"wifi-connecting", true, IconConnecting},
+		{"wifi-wait-ip", true, IconConnecting},
+		{"authenticating", true, IconConnecting},
+		{"retry-wait", true, IconConnecting},
+		{"checking", true, IconConnecting},
+		{"", true, IconConnecting},
+		{"config-required", true, IconOffline},
+	}
+	for _, tt := range tests {
+		if got := iconKindForState(tt.state, tt.campus); got != tt.want {
+			t.Errorf("state %q, campus %v: got %v, want %v", tt.state, tt.campus, got, tt.want)
+		}
+	}
+}
+
 func TestShellNotifyIconDirect(t *testing.T) {
 	nid := notifyIconData{
 		size:  uint32(unsafe.Sizeof(notifyIconData{})),

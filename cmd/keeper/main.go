@@ -59,6 +59,7 @@ type controller struct {
 	deadGatewayCount int
 	lastWiFiReset    time.Time
 	reconnectTrigger chan struct{}
+	linkRecheck      chan struct{}
 }
 
 func main() {
@@ -123,6 +124,7 @@ func main() {
 		wifiBackoff:      retryBase,
 		wifiTimer:        time.NewTimer(time.Hour),
 		reconnectTrigger: make(chan struct{}, 1),
+		linkRecheck:      make(chan struct{}, 1),
 	}
 	c.portal.SetDiagnostic(diagnostic)
 	stopTimer(c.retryTimer)
@@ -216,6 +218,8 @@ func (c *controller) run(ctx context.Context) error {
 			c.resetRetry()
 			c.resetWiFiRetry()
 			_ = c.cycle(ctx, "手动重连")
+		case <-c.linkRecheck:
+			_ = c.cycle(ctx, "切网后立即复核")
 		case link := <-linkChanges:
 			if link != c.link {
 				c.adoptLink(link)
@@ -279,6 +283,9 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := c.verifyProbeLink(probeLink); err != nil {
+		return err
+	}
 	if result.Online {
 		c.deadGatewayCount = 0
 		c.detectCampusFromLink()
@@ -305,6 +312,9 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := c.verifyProbeLink(probeLink); err != nil {
+			return err
+		}
 		if second.Online {
 			c.deadGatewayCount = 0
 			c.detectCampusFromLink()
@@ -320,6 +330,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	c.refreshLink()
 	if !c.link.SameNetwork(probeLink) {
+		c.scheduleLinkRecheck()
 		return errors.New("网络检测期间网络已切换，等待重新识别")
 	}
 	if !c.link.Ready() {
@@ -332,6 +343,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return errors.New("当前接口没有校园网特征，等待网络恢复")
 	}
 	if !c.cfg.Valid() {
+		c.setState("config-required", "未配置登录账号或密码")
 		return errors.New("未配置登录账号或密码")
 	}
 	if c.link.Kind == "wifi" && result.Redirect == "" {
@@ -358,14 +370,19 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		if reason == "手动重连" {
 			c.resetRetry()
 		} else {
+			c.setState("retry-wait", "等待认证重试")
 			if !c.quiet {
 				c.logger.Printf("认证退避中，预计 %s 后重试", time.Until(c.nextRetry).Round(time.Second))
 			}
 			return errors.New("等待认证重试")
 		}
 	}
+	c.setState("authenticating", "正在准备校园网认证")
 	decision, err := c.portal.PrepareAuthentication(ctx, result)
 	if err != nil {
+		if ctx.Err() == nil {
+			c.setState("offline", "暂时无法准备校园网认证")
+		}
 		if ctx.Err() == nil {
 			c.logger.Printf("暂停认证：%v；继续检查网络", err)
 		}
@@ -373,6 +390,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	c.refreshLink()
 	if !c.link.SameNetwork(probeLink) {
+		c.scheduleLinkRecheck()
 		return errors.New("认证复核期间网络已切换，取消本轮认证")
 	}
 	if decision.Online {
@@ -386,6 +404,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	site, err := campus.ChooseCampus(c.cfg.CampusMode, portalURL, c.link.LinkInfo(), c.campus)
 	if err != nil {
 		c.scheduleRetry("不能选择认证流程：" + err.Error())
+		c.setState("retry-wait", "等待认证重试")
 		return err
 	}
 	if c.campus != site {
@@ -398,6 +417,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	chosenLink := c.link
 	c.refreshLink()
 	if !c.link.SameNetwork(chosenLink) {
+		c.scheduleLinkRecheck()
 		return errors.New("认证前网络已切换，等待重新识别")
 	}
 	if !c.link.Ready() {
@@ -416,6 +436,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 			return cancelled
 		}
 		c.scheduleRetry("认证接口未确认成功：" + err.Error())
+		c.setState("retry-wait", "认证失败，等待重试")
 		return err
 	}
 	c.logger.Print("认证接口已响应，正在核验网络")
@@ -425,7 +446,14 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 			return ctx.Err()
 		case <-time.After(3 * time.Second):
 		}
-		if c.portal.Probe(ctx).Online {
+		verified := c.portal.Probe(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.verifyProbeLink(chosenLink); err != nil {
+			return err
+		}
+		if verified.Online {
 			c.deadGatewayCount = 0
 			c.setState("online", "已连通")
 			c.resetRetry()
@@ -434,6 +462,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		}
 		c.refreshLink()
 		if !c.link.SameNetwork(chosenLink) {
+			c.scheduleLinkRecheck()
 			return errors.New("认证核验期间网络已切换")
 		}
 		if !c.link.Ready() {
@@ -442,7 +471,34 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		}
 	}
 	c.scheduleRetry("认证后 15 秒仍无法访问外网")
+	c.setState("retry-wait", "认证后外网仍未连通，等待重试")
 	return errors.New("认证未使网络恢复")
+}
+
+func (c *controller) verifyProbeLink(expected network.LinkState) error {
+	c.refreshLink()
+	return c.acceptProbeLink(expected)
+}
+
+func (c *controller) acceptProbeLink(expected network.LinkState) error {
+	if !probeLinkCurrent(expected, c.link) {
+		c.scheduleLinkRecheck()
+		return errors.New("网络探测期间网络已切换，等待重新识别")
+	}
+	return nil
+}
+
+func (c *controller) scheduleLinkRecheck() {
+	// The monitor may report this same link later; the main loop would then
+	// skip its event because refreshLink already adopted it.
+	select {
+	case c.linkRecheck <- struct{}{}:
+	default:
+	}
+}
+
+func probeLinkCurrent(expected, current network.LinkState) bool {
+	return current.Ready() && current.SameNetwork(expected)
 }
 
 func (c *controller) refreshLink() bool {
@@ -458,6 +514,8 @@ func (c *controller) adoptLink(next network.LinkState) bool {
 		return false
 	}
 	if !next.SameNetwork(c.link) {
+		// An online result from the previous network is no longer valid.
+		c.state = "checking"
 		hadContext := c.campus != "" || c.lastPortal != "" || !c.nextRetry.IsZero()
 		c.lastPortal = ""
 		c.campus = ""
@@ -495,7 +553,7 @@ func (c *controller) syncUI() {
 	isCampus := network.IsCampusLink(c.link)
 	c.mu.Unlock()
 
-	c.ui.UpdateDashboard(st, netSummary, opName, ipv4, isCampus)
+	c.ui.UpdateDashboard(st, netSummary, opName, ipv4, isCampus, c.state)
 }
 
 func (c *controller) status() string {
@@ -523,6 +581,12 @@ func stateName(s string) string {
 		return "连接中"
 	case "wifi-wait-ip":
 		return "获取地址中"
+	case "authenticating":
+		return "正在认证"
+	case "retry-wait":
+		return "等待重试"
+	case "config-required":
+		return "需要配置账号"
 	default:
 		return "检测中"
 	}

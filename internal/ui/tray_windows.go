@@ -142,6 +142,7 @@ type DashboardInfo struct {
 	Operator string
 	IP       string
 	IsCampus bool
+	State    string
 }
 
 type TrayUI struct {
@@ -208,7 +209,6 @@ func initDpiAwareness() {
 		proc.Call()
 	}
 }
-
 
 func setWndProc(hwnd uintptr, newProc uintptr) uintptr {
 	if setWindowLongPtr.Find() == nil {
@@ -620,7 +620,7 @@ func (t *TrayUI) showConsole() {
 	}
 }
 
-func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus bool) {
+func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus bool, state string) {
 	t.mu.Lock()
 	t.dash = DashboardInfo{
 		Status:   status,
@@ -628,6 +628,7 @@ func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus 
 		Operator: operator,
 		IP:       ip,
 		IsCampus: isCampus,
+		State:    state,
 	}
 	wv := t.wv
 	hwndTray := t.hwndTray
@@ -667,16 +668,7 @@ func (t *TrayUI) updateIconWithErr(action uint32) (bool, error) {
 		return false, errors.New("hwnd is 0")
 	}
 
-	var kind IconKind
-	if dash.IsCampus {
-		kind = IconCampusOnline
-	} else if strings.Contains(dash.Status, "正常") || strings.Contains(dash.Status, "已连接") {
-		kind = IconExternalOnline
-	} else if strings.Contains(dash.Status, "重试") || strings.Contains(dash.Status, "认证中") || strings.Contains(dash.Status, "正在") {
-		kind = IconConnecting
-	} else {
-		kind = IconOffline
-	}
+	kind := iconKindForState(dash.State, dash.IsCampus)
 
 	newIcon := CreateShieldIcon(kind)
 	t.mu.Lock()
@@ -692,7 +684,7 @@ func (t *TrayUI) updateIconWithErr(action uint32) (bool, error) {
 		icon:     newIcon,
 	}
 
-	copy(data.tip[:], syscall.StringToUTF16("CampusKeeper"))
+	copy(data.tip[:], syscall.StringToUTF16("CampusKeeper · "+dash.Status))
 
 	res, _, callErr := shellNotifyIcon.Call(uintptr(action), uintptr(unsafe.Pointer(&data)))
 	if oldIcon != 0 {

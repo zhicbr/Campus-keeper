@@ -57,6 +57,21 @@ func rgba(r, g, b, a uint8) uint32 {
 	return uint32(b) | (uint32(g) << 8) | (uint32(r) << 16) | (uint32(a) << 24)
 }
 
+// A campus link may be associated without actually reaching the internet.
+func iconKindForState(state string, isCampus bool) IconKind {
+	switch state {
+	case "online":
+		if isCampus {
+			return IconCampusOnline
+		}
+		return IconExternalOnline
+	case "", "checking", "wifi-connecting", "wifi-wait-ip", "authenticating", "retry-wait":
+		return IconConnecting
+	default:
+		return IconOffline
+	}
+}
+
 func CreateShieldIcon(kind IconKind) uintptr {
 	const w, h = 16, 16
 	var (
