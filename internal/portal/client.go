@@ -298,27 +298,35 @@ func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentI
 		return errors.New("没有可用的校园网 IPv4 地址")
 	}
 	account := cfg.AccountFor(site)
-	mac := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac"))
-	if len(mac) != 12 {
-		mac = strings.NewReplacer("-", "", ":", "").Replace(currentMAC)
-	}
-	if len(mac) != 12 {
-		mac = "000000000000"
-	}
-	params := url.Values{
-		"c": {"Portal"}, "a": {"login"}, "login_method": {"1"},
-		"user_account": {account}, "user_password": {cfg.Password},
-		"wlan_user_ip": {ip}, "wlan_user_mac": {mac},
-		"jsVersion": {"3.0"},
-	}
-	if q.Get("wlanacname") != "" || q.Get("wlanacip") != "" {
-		params.Set("wlan_ac_name", q.Get("wlanacname"))
-		params.Set("wlan_ac_ip", q.Get("wlanacip"))
+	mac := "000000000000"
+	if raw := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac")); len(raw) == 12 {
+		mac = raw
+	} else if site == campus.Wenchang {
+		if raw := strings.NewReplacer("-", "", ":", "").Replace(currentMAC); len(raw) == 12 {
+			mac = raw
+		}
 	}
 	stamp := time.Now().UnixMilli()
-	params.Set("callback", fmt.Sprintf("dr%d", stamp))
-	params.Set("_", fmt.Sprint(stamp))
-	base.RawQuery = params.Encode()
+	queryParts := []string{
+		"c=Portal",
+		"a=login",
+		fmt.Sprintf("callback=dr%d", stamp),
+		"login_method=1",
+		"user_account=" + account,
+		"user_password=" + url.QueryEscape(cfg.Password),
+		"wlan_user_ip=" + ip,
+		"wlan_user_mac=" + mac,
+	}
+	if site == campus.Wenchang {
+		if q.Get("wlanacname") != "" {
+			queryParts = append(queryParts, "wlan_ac_name="+url.QueryEscape(q.Get("wlanacname")))
+		}
+		if q.Get("wlanacip") != "" {
+			queryParts = append(queryParts, "wlan_ac_ip="+url.QueryEscape(q.Get("wlanacip")))
+		}
+	}
+	queryParts = append(queryParts, "jsVersion=3.0", fmt.Sprintf("_=%d", stamp))
+	base.RawQuery = strings.Join(queryParts, "&")
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
 	resp, err := p.doDiagnostic(request, "login")
 	if err != nil {

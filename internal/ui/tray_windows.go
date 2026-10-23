@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	webview2 "github.com/jchv/go-webview2"
@@ -258,6 +259,15 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	// Attach this GUI thread to the interactive user desktop if running from background session
+	openDesktop := user32.NewProc("OpenDesktopW")
+	setThreadDesktop := user32.NewProc("SetThreadDesktop")
+	closeDesktop := user32.NewProc("CloseDesktop")
+	if hDesk, _, _ := openDesktop.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Default"))), 0, 0, 0x10000000); hDesk != 0 {
+		setThreadDesktop.Call(hDesk)
+		closeDesktop.Call(hDesk)
+	}
+
 	instance, _, _ := getModuleHandle.Call(0)
 	trayClassName, _ := syscall.UTF16PtrFromString("WenchangCampusKeeperTray")
 
@@ -311,8 +321,20 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 	t.hwndTray = hwndTray
 	t.mu.Unlock()
 
-	if !t.updateIcon(nimAdd) {
-		ready <- errors.New("无法添加系统托盘图标")
+	var lastErr error
+	added := false
+	for attempt := 0; attempt < 10; attempt++ {
+		ok, err := t.updateIconWithErr(nimAdd)
+		if ok {
+			added = true
+			break
+		}
+		lastErr = err
+		t.updateIcon(nimDelete)
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !added {
+		ready <- fmt.Errorf("无法添加系统托盘图标 (err=%v, hwnd=%x)", lastErr, hwndTray)
 		destroyWindow.Call(hwndTray)
 		return
 	}
@@ -630,6 +652,11 @@ func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus 
 }
 
 func (t *TrayUI) updateIcon(action uint32) bool {
+	ok, _ := t.updateIconWithErr(action)
+	return ok
+}
+
+func (t *TrayUI) updateIconWithErr(action uint32) (bool, error) {
 	t.mu.Lock()
 	hwnd := t.hwndTray
 	dash := t.dash
@@ -637,7 +664,7 @@ func (t *TrayUI) updateIcon(action uint32) bool {
 	t.mu.Unlock()
 
 	if hwnd == 0 {
-		return false
+		return false, errors.New("hwnd is 0")
 	}
 
 	var kind IconKind
@@ -667,7 +694,7 @@ func (t *TrayUI) updateIcon(action uint32) bool {
 
 	copy(data.tip[:], syscall.StringToUTF16("CampusKeeper"))
 
-	res, _, _ := shellNotifyIcon.Call(uintptr(action), uintptr(unsafe.Pointer(&data)))
+	res, _, callErr := shellNotifyIcon.Call(uintptr(action), uintptr(unsafe.Pointer(&data)))
 	if oldIcon != 0 {
 		destroyIcon.Call(oldIcon)
 	}
@@ -677,7 +704,10 @@ func (t *TrayUI) updateIcon(action uint32) bool {
 	if hwndWebview != 0 && newIcon != 0 {
 		postMessage.Call(hwndWebview, wmSetIcon, iconSmall, newIcon)
 	}
-	return res != 0
+	if res == 0 {
+		return false, callErr
+	}
+	return true, nil
 }
 
 func (t *TrayUI) popupMenu() {
