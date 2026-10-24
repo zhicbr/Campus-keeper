@@ -46,6 +46,8 @@ const (
 	mfString    = 0x00000000
 	mfGrayed    = 0x00000001
 	mfDisabled  = 0x00000002
+	mfChecked   = 0x00000008
+	mfUnchecked = 0x00000000
 	mfSeparator = 0x00000800
 
 	menuCmdHeader    = 2001
@@ -54,6 +56,7 @@ const (
 	menuCmdLogs      = 2004
 	menuCmdOpenDir   = 2005
 	menuCmdExit      = 2006
+	menuCmdAutoStart = 2007
 )
 
 var (
@@ -734,6 +737,13 @@ func (t *TrayUI) popupMenu() {
 	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号设置..."))))
 	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运行日志..."))))
 	appendMenu.Call(menu, mfString, menuCmdOpenDir, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("数据目录"))))
+
+	autoStartFlags := mfString
+	if config.IsAutoStartEnabled() {
+		autoStartFlags |= mfChecked
+	}
+	appendMenu.Call(menu, uintptr(autoStartFlags), menuCmdAutoStart, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("开机自启动"))))
+
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 	appendMenu.Call(menu, mfString, menuCmdExit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出"))))
 
@@ -755,6 +765,17 @@ func (t *TrayUI) popupMenu() {
 	case menuCmdOpenDir:
 		dir := config.AppDataDir()
 		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
+	case menuCmdAutoStart:
+		enabled := config.IsAutoStartEnabled()
+		if err := config.SetAutoStart(!enabled); err == nil {
+			if !enabled {
+				fmt.Fprintln(t, "[UI] 已开启开机自启动 (HKCU Run)")
+			} else {
+				fmt.Fprintln(t, "[UI] 已关闭开机自启动")
+			}
+		} else {
+			fmt.Fprintf(t, "[UI] 设置开机自启动失败: %v\n", err)
+		}
 	case menuCmdExit:
 		t.mu.Lock()
 		hwnd := t.hwndTray

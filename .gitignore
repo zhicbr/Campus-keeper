@@ -16,5 +16,6 @@ logs/
 
 # Investigation records and scratch scripts (完全忽略的排查记录与临时脚本)
 docs/incidents/
+docs/bug/
 scripts/Collect-Diagnostics.ps1
 scripts/tools/
