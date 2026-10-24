@@ -149,6 +149,14 @@ type DashboardInfo struct {
 	State    string
 }
 
+// TrayCallbacks encapsulates application callbacks required by the tray UI.
+type TrayCallbacks struct {
+	Quit       func()
+	Reconnect  func()
+	GetConfig  func() config.Config
+	SaveConfig func(account, password, opStr string) (changed bool, err error)
+}
+
 type TrayUI struct {
 	mu            sync.Mutex
 	wvOnce        sync.Once
@@ -165,11 +173,8 @@ type TrayUI struct {
 	currentIcon   uintptr
 	menuOpen      bool
 
-	quit         func()
-	onReconnect  func()
-	getConfig    func() config.Config
-	onSaveConfig func(config.Config)
-	done         chan struct{}
+	cb   TrayCallbacks
+	done chan struct{}
 }
 
 func (t *TrayUI) setWindowIcons(hwnd uintptr) {
@@ -231,17 +236,14 @@ func applyModernWindowAttributes(hwnd uintptr) {
 	}
 }
 
-func StartTray(quit func(), onReconnect func(), getConfig func() config.Config, onSaveConfig func(config.Config), showConsole bool) (*TrayUI, error) {
+func StartTray(cb TrayCallbacks, showConsole bool) (*TrayUI, error) {
 	t := &TrayUI{
 		dash: DashboardInfo{
 			Status:  "检测中",
 			Network: "检测中",
 		},
-		quit:         quit,
-		onReconnect:  onReconnect,
-		getConfig:    getConfig,
-		onSaveConfig: onSaveConfig,
-		done:         make(chan struct{}),
+		cb:   cb,
+		done: make(chan struct{}),
 	}
 
 	initDpiAwareness()
@@ -290,7 +292,7 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 			t.updateIcon(nimModify)
 			return 0
 		case WakeMessage:
-			if t.getConfig != nil && !t.getConfig().Valid() {
+			if t.cb.GetConfig != nil && !t.cb.GetConfig().Valid() {
 				t.openSettings()
 			} else {
 				t.showConsole()
@@ -427,30 +429,19 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 
 	// Bind Go RPC methods
 	wv.Bind("saveConfig", func(account, password, opStr string) (bool, error) {
-		op := config.OperatorCMCC
-		switch opStr {
-		case "移动", "中国移动":
-			op = config.OperatorCMCC
-		case "电信", "中国电信":
-			op = config.OperatorTelecom
-		case "联通", "中国联通":
-			op = config.OperatorUnicom
-		case "校园网":
-			op = config.OperatorCampus
+		if t.cb.SaveConfig == nil {
+			return false, errors.New("配置服务未就绪")
 		}
-		if t.onSaveConfig != nil {
-			go t.onSaveConfig(config.Config{
-				Account:  account,
-				Password: password,
-				Operator: op,
-			})
-		}
-		return true, nil
+		// Note on threading: wv.Bind callbacks run on the WebView2 message loop thread.
+		// SaveConfig resolves validation, DPAPI encryption, and atomic file flush outside
+		// the state lock, returning persistence success/failure directly to the webview.
+		// Network recheck/reconnection is dispatched asynchronously via non-blocking channels.
+		return t.cb.SaveConfig(account, password, opStr)
 	})
 
 	wv.Bind("reconnect", func() (bool, error) {
-		if t.onReconnect != nil {
-			go t.onReconnect()
+		if t.cb.Reconnect != nil {
+			go t.cb.Reconnect()
 		}
 		return true, nil
 	})
@@ -462,18 +453,19 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 	})
 
 	type jsConfig struct {
-		Account  string `json:"account"`
-		Password string `json:"password"`
-		Operator string `json:"operator"`
+		Account     string `json:"account"`
+		HasPassword bool   `json:"hasPassword"`
+		Operator    string `json:"operator"`
 	}
 	wv.Bind("getConfig", func() (jsConfig, error) {
 		var res jsConfig
-		if t.getConfig != nil {
-			cfg := t.getConfig()
-			res.Account = cfg.Account
-			res.Password = cfg.Password
-			res.Operator = cfg.OperatorName()
+		if t.cb.GetConfig == nil {
+			return res, errors.New("配置服务未就绪")
 		}
+		cfg := t.cb.GetConfig()
+		res.Account = strings.TrimSpace(cfg.Account)
+		res.HasPassword = strings.TrimSpace(cfg.Password) != ""
+		res.Operator = cfg.OperatorName()
 		return res, nil
 	})
 
@@ -773,8 +765,8 @@ func (t *TrayUI) popupMenu() {
 
 	switch selected {
 	case menuCmdReconnect:
-		if t.onReconnect != nil {
-			go t.onReconnect()
+		if t.cb.Reconnect != nil {
+			go t.cb.Reconnect()
 		}
 	case menuCmdSettings:
 		t.openSettings()
@@ -797,7 +789,7 @@ func (t *TrayUI) popupMenu() {
 		wv := t.wv
 		hwndWebview := t.hwndWebview
 		oldWndProc := t.oldWndProc
-		quit := t.quit
+		quit := t.cb.Quit
 		t.mu.Unlock()
 
 		diagnostics.SetConsoleWriter(io.Discard)

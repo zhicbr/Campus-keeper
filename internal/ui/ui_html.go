@@ -179,7 +179,6 @@ const appHTML = `<!DOCTYPE html>
     display: flex;
     justify-content: flex-end;
     align-items: center;
-    position: relative;
   }
   .fluent-input {
     width: 260px;
@@ -204,21 +203,14 @@ const appHTML = `<!DOCTYPE html>
     border-color: var(--accent);
     border-bottom-width: 2px;
   }
-  .eye-toggle {
-    position: absolute;
-    right: 8px;
-    background: transparent;
-    border: none;
-    cursor: pointer;
+  .fluent-input::placeholder {
     color: var(--text-muted);
-    padding: 3px 5px;
-    display: flex;
-    align-items: center;
-    border-radius: 3px;
+    font-size: 12px;
   }
-  .eye-toggle:hover {
-    color: var(--text-primary);
-    background: #f0f0f0;
+  .fluent-input:disabled {
+    background: #f7f7f7;
+    color: var(--text-muted);
+    cursor: not-allowed;
   }
   select.fluent-input {
     cursor: pointer;
@@ -269,14 +261,18 @@ const appHTML = `<!DOCTYPE html>
     justify-content: center;
     transition: all 0.1s ease;
   }
+  .fluent-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
   .fluent-btn-primary {
     background: var(--accent);
     color: var(--accent-text);
   }
-  .fluent-btn-primary:hover {
+  .fluent-btn-primary:not(:disabled):hover {
     background: var(--accent-hover);
   }
-  .fluent-btn-primary:active {
+  .fluent-btn-primary:not(:disabled):active {
     background: var(--accent-active);
   }
   .fluent-btn-secondary {
@@ -285,7 +281,7 @@ const appHTML = `<!DOCTYPE html>
     border-color: var(--border-control);
     border-bottom-color: #999999;
   }
-  .fluent-btn-secondary:hover {
+  .fluent-btn-secondary:not(:disabled):hover {
     background: #fbfbfb;
     border-color: var(--border-control-hover);
   }
@@ -411,18 +407,13 @@ const appHTML = `<!DOCTYPE html>
           <label class="setting-label" for="password">密码</label>
           <div class="control-wrapper">
             <input type="password" id="password" class="fluent-input" placeholder="校园网密码" autocomplete="off" />
-            <button type="button" id="togglePwd" class="eye-toggle" title="显示密码">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-            </button>
           </div>
         </div>
         <div class="setting-row">
           <label class="setting-label" for="operator">运营商</label>
           <div class="control-wrapper">
             <select id="operator" class="fluent-input">
+              <option value="" disabled selected hidden>请选择运营商</option>
               <option value="移动">中国移动</option>
               <option value="电信">中国电信</option>
               <option value="联通">中国联通</option>
@@ -484,12 +475,23 @@ const appHTML = `<!DOCTYPE html>
     btn.addEventListener('click', () => switchTab(btn.getAttribute('data-tab')));
   });
 
-  // Password visibility toggle
-  const pwdInput = document.getElementById('password');
-  const togglePwd = document.getElementById('togglePwd');
-  togglePwd.addEventListener('click', () => {
-    pwdInput.type = pwdInput.type === 'password' ? 'text' : 'password';
-  });
+  let savedAccount = '';
+  let hasSavedPassword = false;
+
+  function updatePasswordPlaceholder() {
+    const curAcc = document.getElementById('account').value.trim();
+    const pwdEl = document.getElementById('password');
+    const isDifferent = Boolean(savedAccount && curAcc.toLowerCase() !== savedAccount.toLowerCase());
+    if (!hasSavedPassword || isDifferent) {
+      pwdEl.placeholder = (savedAccount && isDifferent)
+        ? '请输入新密码'
+        : '校园网密码';
+    } else {
+      pwdEl.placeholder = '●●●●●●●● (留空保持原密码)';
+    }
+  }
+
+  document.getElementById('account').addEventListener('input', updatePasswordPlaceholder);
 
   // Toast
   let toastTimer = null;
@@ -544,22 +546,53 @@ const appHTML = `<!DOCTYPE html>
     if (window.openDataDir) window.openDataDir();
   });
 
+  function setSavingState(saving) {
+    document.getElementById('account').disabled = saving;
+    document.getElementById('password').disabled = saving;
+    document.getElementById('operator').disabled = saving;
+    const btn = document.getElementById('btnSave');
+    btn.disabled = saving;
+    btn.innerText = saving ? '保存中...' : '保存配置';
+  }
+
   // Save config
   document.getElementById('btnSave').addEventListener('click', async () => {
-    const acc = document.getElementById('account').value.trim();
-    const pwd = document.getElementById('password').value;
-    const op = document.getElementById('operator').value;
-    if (!acc || !pwd) {
-      showToast('请填写完整的账号和密码');
+    const accInput = document.getElementById('account');
+    const pwdInput = document.getElementById('password');
+    const opInput = document.getElementById('operator');
+
+    const acc = accInput.value.trim();
+    const pwd = pwdInput.value;
+    const op = opInput.value;
+
+    if (!acc) {
+      showToast('请填写账号');
       return;
     }
+
+    setSavingState(true);
     try {
       if (window.saveConfig) {
-        await window.saveConfig(acc, pwd, op);
+        const changed = await window.saveConfig(acc, pwd, op);
+        if (!changed) {
+          showToast('配置未做更改');
+          return;
+        }
+        savedAccount = acc;
+        hasSavedPassword = true;
+        pwdInput.value = '';
+        updatePasswordPlaceholder();
         showToast('配置已保存');
       }
     } catch (e) {
-      showToast('保存失败: ' + e);
+      const msg = (e && e.message) ? e.message : String(e);
+      if (msg.includes('不能为空') || msg.includes('必须输入') || msg.includes('未知运营商')) {
+        showToast(msg);
+      } else {
+        showToast('保存失败: ' + msg);
+      }
+    } finally {
+      setSavingState(false);
     }
   });
 
@@ -590,9 +623,12 @@ const appHTML = `<!DOCTYPE html>
       if (window.getConfig) {
         const cfg = await window.getConfig();
         if (cfg) {
-          if (cfg.account) document.getElementById('account').value = cfg.account;
-          if (cfg.password) document.getElementById('password').value = cfg.password;
+          savedAccount = (cfg.account || '').trim();
+          hasSavedPassword = !!cfg.hasPassword;
+          document.getElementById('account').value = savedAccount;
           if (cfg.operator) document.getElementById('operator').value = cfg.operator;
+          document.getElementById('password').value = '';
+          updatePasswordPlaceholder();
         }
       }
       if (window.getDashboard) {

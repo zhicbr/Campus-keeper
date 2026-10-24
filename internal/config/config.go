@@ -120,6 +120,37 @@ func LogPath() string {
 	return filepath.Join(AppDataDir(), "keeper.log")
 }
 
+// atomicWriteFile writes data to a temporary file in the same directory as filename,
+// flushes it to disk, and renames it to filename with 0600 permissions, preventing incomplete file corruption.
+func atomicWriteFile(filename string, data []byte) error {
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmpFile, err := os.CreateTemp(dir, "cfg-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpName, filename)
+}
+
 func SaveEncryptedConfig(cfg Config) error {
 	s := storedConfig{
 		Account:   strings.TrimSpace(cfg.Account),
@@ -138,7 +169,7 @@ func SaveEncryptedConfig(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigPath(), enc, 0600)
+	return atomicWriteFile(ConfigPath(), enc)
 }
 
 func LoadEncryptedConfig() (Config, error) {

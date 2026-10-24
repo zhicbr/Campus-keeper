@@ -132,33 +132,20 @@ func main() {
 	c.nextReset = nextSix(time.Now())
 
 	tray, err := ui.StartTray(
-		cancel,
-		func() {
-			select {
-			case c.reconnectTrigger <- struct{}{}:
-			default:
-			}
-		},
-		func() config.Config {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			return c.cfg
-		},
-		func(newCfg config.Config) {
-			c.mu.Lock()
-			c.cfg = newCfg
-			c.portal.SetConfig(newCfg)
-			c.mu.Unlock()
-			if err := config.SaveEncryptedConfig(newCfg); err != nil {
-				c.logger.Printf("保存登录配置失败：%v", err)
-			} else {
-				c.logger.Printf("登录配置已更新；账号 %s；运营商 %s", config.Mask(newCfg.Account), newCfg.OperatorName())
-			}
-			c.syncUI()
-			select {
-			case c.reconnectTrigger <- struct{}{}:
-			default:
-			}
+		ui.TrayCallbacks{
+			Quit: cancel,
+			Reconnect: func() {
+				select {
+				case c.reconnectTrigger <- struct{}{}:
+				default:
+				}
+			},
+			GetConfig: func() config.Config {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				return c.cfg
+			},
+			SaveConfig: c.updateConfig,
 		},
 		*console,
 	)
@@ -539,6 +526,50 @@ func (c *controller) setState(next, message string) {
 	}
 	c.state = next
 	c.syncUI()
+}
+
+func (c *controller) updateConfig(account, password, opStr string) (bool, error) {
+	// 1. Snapshot and resolve candidate config under lock (pure memory operation)
+	candidate, changed, err := func() (config.Config, bool, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		res, err := config.ResolveConfigUpdate(account, password, opStr, c.cfg)
+		if err != nil {
+			return config.Config{}, false, err
+		}
+		return res.NewConfig, res.Changed, nil
+	}()
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+
+	// 2. Heavy persistence I/O (DPAPI + temp file + fsync + atomic rename) OUTSIDE the lock
+	// This prevents slow disk or antivirus file scanning from blocking the main loop or tray thread.
+	if err := config.SaveEncryptedConfig(candidate); err != nil {
+		c.logger.Printf("保存登录配置失败：%v", err)
+		return false, errors.New("保存配置失败，请检查文件权限或稍后重试")
+	}
+
+	// 3. Commit new config under lock
+	func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.cfg = candidate
+		c.portal.SetConfig(candidate)
+	}()
+
+	// 4. Update UI and trigger reconnect outside the lock
+	c.logger.Printf("登录配置已更新；账号 %s；运营商 %s", config.Mask(candidate.Account), candidate.OperatorName())
+	c.syncUI()
+
+	select {
+	case c.reconnectTrigger <- struct{}{}:
+	default:
+	}
+	return true, nil
 }
 
 func (c *controller) syncUI() {
