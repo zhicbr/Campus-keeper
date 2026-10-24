@@ -747,15 +747,14 @@ func (t *TrayUI) popupMenu() {
 
 	// 3. Actions
 	appendMenu.Call(menu, mfString, menuCmdReconnect, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("重新连接"))))
-	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号设置..."))))
-	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运行日志..."))))
-	appendMenu.Call(menu, mfString, menuCmdOpenDir, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("数据目录"))))
+	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("账号设置"))))
+	appendMenu.Call(menu, mfString, menuCmdLogs, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("运行日志"))))
 
-	autoStartFlags := mfString
+	autoStartText := "开机自启动\tOFF"
 	if config.IsAutoStartEnabled() {
-		autoStartFlags |= mfChecked
+		autoStartText = "开机自启动\tON"
 	}
-	appendMenu.Call(menu, uintptr(autoStartFlags), menuCmdAutoStart, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("开机自启动"))))
+	appendMenu.Call(menu, mfString, menuCmdAutoStart, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(autoStartText))))
 
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 	appendMenu.Call(menu, mfString, menuCmdExit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出"))))
@@ -781,9 +780,6 @@ func (t *TrayUI) popupMenu() {
 		t.openSettings()
 	case menuCmdLogs:
 		t.showConsole()
-	case menuCmdOpenDir:
-		dir := config.AppDataDir()
-		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
 	case menuCmdAutoStart:
 		enabled := config.IsAutoStartEnabled()
 		if err := config.SetAutoStart(!enabled); err == nil {
