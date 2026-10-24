@@ -19,7 +19,8 @@ const (
 // It is a package variable so unit tests can use an isolated key name.
 var runValName = "WenchangCampusKeeper"
 
-// IsAutoStartEnabled reports whether the auto-start registry key exists in HKCU\...\Run.
+// IsAutoStartEnabled reports whether the auto-start registry key exists in HKCU\...\Run
+// and matches the current executable's path.
 func IsAutoStartEnabled() bool {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.QUERY_VALUE)
 	if err != nil {
@@ -31,7 +32,32 @@ func IsAutoStartEnabled() bool {
 	if err != nil || strings.TrimSpace(val) == "" {
 		return false
 	}
-	return true
+
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+
+	regExe := extractExecPath(val)
+	return strings.EqualFold(filepath.Clean(regExe), filepath.Clean(exe))
+}
+
+// extractExecPath extracts the executable file path from a registry command string.
+// Supports both quoted paths (e.g., "\"C:\path\app.exe\" -quiet") and unquoted paths.
+func extractExecPath(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if strings.HasPrefix(cmd, "\"") {
+		cmd = cmd[1:]
+		if idx := strings.Index(cmd, "\""); idx >= 0 {
+			return cmd[:idx]
+		}
+		return cmd
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) > 0 {
+		return fields[0]
+	}
+	return cmd
 }
 
 // SetAutoStart adds or removes the auto-start entry in HKCU\...\Run.
