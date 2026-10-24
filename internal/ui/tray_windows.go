@@ -91,6 +91,7 @@ var (
 	sendMessage           = user32.NewProc("SendMessageW")
 	loadImage             = user32.NewProc("LoadImageW")
 	getSystemMetrics      = user32.NewProc("GetSystemMetrics")
+	keybdEvent            = user32.NewProc("keybd_event")
 )
 
 type winPoint struct{ x, y int32 }
@@ -162,6 +163,7 @@ type TrayUI struct {
 	dash          DashboardInfo
 	logText       string
 	currentIcon   uintptr
+	menuOpen      bool
 
 	quit         func()
 	onReconnect  func()
@@ -309,10 +311,10 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 	registerClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
 	hwndTray, _, _ := createWindowEx.Call(
-		0,
+		0x00000080, // WS_EX_TOOLWINDOW (prevents taskbar button and Alt-Tab entry)
 		uintptr(unsafe.Pointer(trayClassName)),
 		uintptr(unsafe.Pointer(trayClassName)),
-		0x80000000, // WS_POPUP
+		0x90000000, // WS_POPUP | WS_VISIBLE (ensures window is active and valid for SetForegroundWindow)
 		0, 0, 0, 0,
 		0, 0, instance, 0,
 	)
@@ -706,20 +708,31 @@ func (t *TrayUI) updateIconWithErr(action uint32) (bool, error) {
 }
 
 func (t *TrayUI) popupMenu() {
+	t.mu.Lock()
+	if t.menuOpen {
+		t.mu.Unlock()
+		return
+	}
+	t.menuOpen = true
+	dash := t.dash
+	hwnd := t.hwndTray
+	t.mu.Unlock()
+
+	defer func() {
+		t.mu.Lock()
+		t.menuOpen = false
+		t.mu.Unlock()
+	}()
+
+	if hwnd == 0 {
+		return
+	}
+
 	menu, _, _ := createPopupMenu.Call()
 	if menu == 0 {
 		return
 	}
 	defer destroyMenu.Call(menu)
-
-	t.mu.Lock()
-	dash := t.dash
-	hwnd := t.hwndTray
-	t.mu.Unlock()
-
-	if hwnd == 0 {
-		return
-	}
 
 	// 1. Dashboard Status (High contrast, clickable)
 	appendMenu.Call(menu, mfString, menuCmdSettings, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("状态："+dash.Status))))
@@ -749,6 +762,12 @@ func (t *TrayUI) popupMenu() {
 
 	var point winPoint
 	getCursorPos.Call(uintptr(unsafe.Pointer(&point)))
+
+	// MSDN KB Q139526 fix & Win10/11 foreground activation:
+	// Synthesize a key event to break the foreground lock timeout, ensuring
+	// SetForegroundWindow successfully activates the tray window so that
+	// clicking outside the popup menu properly dismisses it (fixes BUG-02).
+	keybdEvent.Call(0, 0, 0, 0)
 	setForegroundWindow.Call(hwnd)
 	selected, _, _ := trackPopupMenu.Call(menu, 0x100|0x2, uintptr(point.x), uintptr(point.y), 0, hwnd, 0)
 	postMessage.Call(hwnd, 0, 0, 0) // WM_NULL (MSDN Q139526 fix)
