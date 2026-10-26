@@ -16,25 +16,24 @@ const (
 	Nanhu    Campus = "nanhu"
 )
 
-var wenchangObservedSubnet = &net.IPNet{IP: net.IPv4(10, 52, 128, 0), Mask: net.CIDRMask(18, 32)}
-var nanhuObservedSubnet = &net.IPNet{IP: net.IPv4(10, 3, 0, 0), Mask: net.CIDRMask(16, 32)}
-
 type LinkInfo struct {
 	Kind string
 	SSID string
 	IPv4 string
 }
 
-// These gateway/subnet combinations are site observations, not global campus
-// ranges. A loose IP, front-page URL, or SSID match is insufficient.
+// CampusFromFingerprint matches against the central KnownFingerprints table.
+// A loose IP, front-page URL, or SSID match is insufficient.
 func CampusFromFingerprint(ipv4, gateway, gatewayMAC string) Campus {
 	ip := net.ParseIP(ipv4).To4()
-	mac := strings.ToUpper(strings.ReplaceAll(gatewayMAC, ":", "-"))
-	if ip != nil && wenchangObservedSubnet.Contains(ip) && gateway == "10.52.191.254" && mac == "7C-1E-06-8F-98-02" {
-		return Wenchang
+	if ip == nil {
+		return ""
 	}
-	if ip != nil && nanhuObservedSubnet.Contains(ip) && gateway == "10.3.255.254" && mac == "80-05-88-46-B4-F9" {
-		return Nanhu
+	mac := strings.ToUpper(strings.ReplaceAll(gatewayMAC, ":", "-"))
+	for _, fp := range compiledTable {
+		if fp.subnet.Contains(ip) && gateway == fp.gatewayIP && mac == fp.gatewayMAC {
+			return fp.campus
+		}
 	}
 	return ""
 }
@@ -65,14 +64,14 @@ func ClassifyPortal(raw string) (PortalKind, error) {
 		return PortalUnknown, nil
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "http" || u.Hostname() != "10.2.5.251" || (u.Port() != "" && u.Port() != "80" && u.Port() != "801") {
+	if err != nil || u.Scheme != "http" || u.Hostname() != AuthHost || (u.Port() != "" && u.Port() != AuthPortDefault && u.Port() != AuthPortPortal) {
 		return PortalUnknown, fmt.Errorf("认证跳转不在已知校园网服务器：%s", safePortal(raw))
 	}
 	path := strings.ToLower(u.Path)
 	switch {
-	case path == "/a79.htm":
+	case path == PathFrontPage:
 		return PortalSharedFrontPage, nil
-	case path == "/eportal" || strings.HasPrefix(path, "/eportal/"):
+	case path == PathEportalPrefix || strings.HasPrefix(path, PathEportalPrefix+"/"):
 		return PortalSharedEportal, nil
 	default:
 		return PortalUnknown, fmt.Errorf("未知的认证页：%s", safePortal(raw))

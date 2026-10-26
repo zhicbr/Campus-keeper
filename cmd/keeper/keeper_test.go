@@ -31,10 +31,54 @@ func TestSixAMResetBoundary(t *testing.T) {
 			t.Fatalf("nextSix(%s) = %s, want %s", tc.at, got, tc.want)
 		}
 	}
-	c := &controller{backoff: retryMax, nextReset: time.Now().Add(-time.Second), logger: log.New(io.Discard, "", 0)}
+	c := &controller{backoff: defaultPolicy.RetryMax, nextReset: time.Now().Add(-time.Second), logger: log.New(io.Discard, "", 0)}
 	c.resetAtSixIfDue()
-	if c.backoff != retryBase {
+	if c.backoff != defaultPolicy.RetryBase {
 		t.Fatalf("06:00 reset left backoff at %s", c.backoff)
+	}
+}
+
+func TestCustomDailyResetPolicy(t *testing.T) {
+	c := newController(config.Config{}, nil, log.New(io.Discard, "", 0), true,
+		WithDailyReset(7, 30),
+		WithRetryPolicy(3*time.Second, 10*time.Minute, 2*time.Minute),
+	)
+	china := time.FixedZone("Asia/Shanghai", 8*3600)
+	at, _ := time.ParseInLocation("2006-01-02 15:04:05", "2026-09-30 07:00:00", china)
+	got := c.nextDailyReset(at).In(china).Format("2006-01-02 15:04:05")
+	if got != "2026-09-30 07:30:00" {
+		t.Fatalf("custom reset got %s, want 2026-09-30 07:30:00", got)
+	}
+
+	// Unspecified options must retain full valid positive defaults (no zero-value ticker panic)
+	p := c.getPolicy()
+	if p.HealthInterval <= 0 || p.StatusInterval <= 0 || p.LinkInterval <= 0 {
+		t.Fatalf("unspecified policy fields must retain positive defaults: %+v", p)
+	}
+
+	c.backoff = 10 * time.Minute
+	c.nextReset = time.Now().Add(-time.Second)
+	c.resetAtSixIfDue()
+	if c.backoff != 3*time.Second {
+		t.Fatalf("custom policy reset left backoff at %s, want 3s", c.backoff)
+	}
+}
+
+func TestOptionNonPositiveValidation(t *testing.T) {
+	c := newController(config.Config{}, nil, log.New(io.Discard, "", 0), true,
+		WithHealthInterval(0),
+		WithLinkInterval(-5*time.Second),
+		WithDailyReset(99, 99),
+	)
+	p := c.getPolicy()
+	if p.HealthInterval != defaultPolicy.HealthInterval {
+		t.Fatalf("zero HealthInterval should not override default, got %v", p.HealthInterval)
+	}
+	if p.LinkInterval != defaultPolicy.LinkInterval {
+		t.Fatalf("negative LinkInterval should not override default, got %v", p.LinkInterval)
+	}
+	if p.DailyResetHour != defaultPolicy.DailyResetHour || p.DailyResetMinute != defaultPolicy.DailyResetMinute {
+		t.Fatalf("out-of-range daily reset should not override default, got %d:%d", p.DailyResetHour, p.DailyResetMinute)
 	}
 }
 
@@ -62,7 +106,7 @@ func TestNetworkSwitchDropsCampusCredentialsContext(t *testing.T) {
 		state:      "online",
 		campus:     campus.Wenchang,
 		lastPortal: "http://10.2.5.251/a79.htm",
-		backoff:    retryMax,
+		backoff:    defaultPolicy.RetryMax,
 		nextRetry:  time.Now().Add(time.Minute),
 		retryTimer: time.NewTimer(time.Hour),
 	}
@@ -143,7 +187,7 @@ func TestRecoveryStatesHaveDistinctDescriptions(t *testing.T) {
 func TestInitialFastRetryPeriodDoesNotBackoff(t *testing.T) {
 	c := &controller{
 		logger:     log.New(io.Discard, "", 0),
-		backoff:    retryBase,
+		backoff:    defaultPolicy.RetryBase,
 		retryTimer: time.NewTimer(time.Hour),
 	}
 	stopTimer(c.retryTimer)
@@ -151,18 +195,18 @@ func TestInitialFastRetryPeriodDoesNotBackoff(t *testing.T) {
 	// Simulate repeated failures within the first minute
 	for i := 0; i < 5; i++ {
 		c.scheduleRetry("failure")
-		if c.backoff != retryBase {
+		if c.backoff != defaultPolicy.RetryBase {
 			t.Fatalf("attempt %d: backoff grew to %v during initial fast retry window", i, c.backoff)
 		}
-		if time.Until(c.nextRetry) > retryBase+2*time.Second {
+		if time.Until(c.nextRetry) > defaultPolicy.RetryBase+2*time.Second {
 			t.Fatalf("attempt %d: delay too large (%v) during fast retry window", i, time.Until(c.nextRetry))
 		}
 	}
 
 	// Simulate failure occurring after fastRetryWindow has passed
-	c.failureStart = time.Now().Add(-fastRetryWindow - 10*time.Second)
+	c.failureStart = time.Now().Add(-defaultPolicy.FastRetryWindow - 10*time.Second)
 	c.scheduleRetry("failure after 2min")
-	if c.backoff <= retryBase {
+	if c.backoff <= defaultPolicy.RetryBase {
 		t.Fatalf("expected backoff to grow after fast retry window elapsed, got %v", c.backoff)
 	}
 }
@@ -170,7 +214,7 @@ func TestInitialFastRetryPeriodDoesNotBackoff(t *testing.T) {
 func TestWiFiFastRetryPeriod(t *testing.T) {
 	c := &controller{
 		logger:      log.New(io.Discard, "", 0),
-		wifiBackoff: retryBase,
+		wifiBackoff: defaultPolicy.RetryBase,
 		wifiTimer:   time.NewTimer(time.Hour),
 	}
 	stopTimer(c.wifiTimer)
@@ -178,15 +222,15 @@ func TestWiFiFastRetryPeriod(t *testing.T) {
 	// In initial window, wifi backoff must not grow
 	for i := 0; i < 4; i++ {
 		c.scheduleWiFiRetry(true)
-		if c.wifiBackoff != retryBase {
+		if c.wifiBackoff != defaultPolicy.RetryBase {
 			t.Fatalf("attempt %d: wifiBackoff grew to %v during initial fast retry window", i, c.wifiBackoff)
 		}
 	}
 
 	// After fastRetryWindow elapsed, wifi backoff should double
-	c.wifiFailureStart = time.Now().Add(-fastRetryWindow - 10*time.Second)
+	c.wifiFailureStart = time.Now().Add(-defaultPolicy.FastRetryWindow - 10*time.Second)
 	c.scheduleWiFiRetry(true)
-	if c.wifiBackoff <= retryBase {
+	if c.wifiBackoff <= defaultPolicy.RetryBase {
 		t.Fatalf("expected wifiBackoff to grow after fast retry window, got %v", c.wifiBackoff)
 	}
 }
@@ -200,7 +244,7 @@ func TestManualReconnectResetsBackoff(t *testing.T) {
 	c := &controller{
 		portal:       p,
 		logger:       log.New(io.Discard, "", 0),
-		backoff:      retryMax,
+		backoff:      defaultPolicy.RetryMax,
 		nextRetry:    time.Now().Add(5 * time.Minute), // in backoff
 		failureStart: time.Now().Add(-10 * time.Minute),
 		retryTimer:   time.NewTimer(time.Hour),
@@ -216,7 +260,7 @@ func TestManualReconnectResetsBackoff(t *testing.T) {
 	if !c.nextRetry.IsZero() {
 		t.Fatalf("expected nextRetry to be cleared on manual reconnect, got %v", c.nextRetry)
 	}
-	if c.backoff != retryBase {
+	if c.backoff != defaultPolicy.RetryBase {
 		t.Fatalf("expected backoff reset to retryBase, got %v", c.backoff)
 	}
 }

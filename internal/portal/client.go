@@ -20,8 +20,6 @@ import (
 	"wenchang-campus-keeper/internal/diagnostics"
 )
 
-const ProbeURL = "http://www.msftconnecttest.com/connecttest.txt"
-
 type ProbeResult struct {
 	Online   bool
 	Redirect string
@@ -149,15 +147,15 @@ func (p *Client) Probe(ctx context.Context) (result ProbeResult) {
 			}
 			if resp.StatusCode == http.StatusOK {
 				data, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
-				a.online = readErr == nil && strings.TrimSpace(string(data)) == "Microsoft Connect Test"
+				a.online = readErr == nil && strings.TrimSpace(string(data)) == PrimaryProbeExpectedContent
 			}
 		} else {
 			a.online = resp.StatusCode >= 200 && resp.StatusCode < 300
 		}
 		answers <- a
 	}
-	go check(true, ProbeURL)
-	go check(false, "https://www.baidu.com/")
+	go check(true, PrimaryProbeURL)
+	go check(false, SecondaryProbeURL)
 	var redirect string
 	var primaryErr error
 	for i := 0; i < 2; i++ {
@@ -241,7 +239,7 @@ func (p *Client) PrepareAuthentication(ctx context.Context, initial ProbeResult)
 }
 
 func (p *Client) discover(ctx context.Context) (string, error) {
-	for _, target := range []string{"http://9.9.9.9/", "http://neverssl.com/"} {
+	for _, target := range RedirectDiscoveryTargets {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -279,7 +277,7 @@ func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentI
 	p.mu.RUnlock()
 	// Both campuses use this backend. The a79 page is shared as well.
 	// Never derive a credential-bearing destination from an arbitrary redirect.
-	base, _ := url.Parse("http://10.2.5.251:801/eportal/")
+	base, _ := url.Parse(DefaultBackendURL)
 	q := url.Values{}
 	if portal != "" {
 		u, _ := url.Parse(portal)

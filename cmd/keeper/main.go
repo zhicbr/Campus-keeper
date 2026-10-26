@@ -23,17 +23,8 @@ import (
 	"wenchang-campus-keeper/internal/ui"
 )
 
-const (
-	healthInterval       = 20 * time.Second
-	linkInterval         = 5 * time.Second
-	statusInterval       = 10 * time.Second
-	onlineStatusInterval = time.Minute
-	retryBase            = 5 * time.Second
-	retryMax             = 5 * time.Minute
-	fastRetryWindow      = 2 * time.Minute // 1~3 分钟初始快速重试期，不进入指数退避
-)
-
 type controller struct {
+	policy           DaemonPolicy
 	mu               sync.Mutex
 	cfg              config.Config
 	portal           *portal.Client
@@ -114,22 +105,9 @@ func main() {
 		defer diagnostic.Close()
 	}
 
-	c := &controller{
-		cfg:              cfg,
-		portal:           portal.NewClient(cfg),
-		logger:           logger,
-		quiet:            *quiet,
-		backoff:          retryBase,
-		retryTimer:       time.NewTimer(time.Hour),
-		wifiBackoff:      retryBase,
-		wifiTimer:        time.NewTimer(time.Hour),
-		reconnectTrigger: make(chan struct{}, 1),
-		linkRecheck:      make(chan struct{}, 1),
-	}
-	c.portal.SetDiagnostic(diagnostic)
-	stopTimer(c.retryTimer)
-	stopTimer(c.wifiTimer)
-	c.nextReset = nextSix(time.Now())
+	portalClient := portal.NewClient(cfg)
+	portalClient.SetDiagnostic(diagnostic)
+	c := newController(cfg, portalClient, logger, *quiet)
 
 	tray, err := ui.StartTray(
 		ui.TrayCallbacks{
@@ -156,7 +134,7 @@ func main() {
 	c.ui = tray
 	c.syncUI()
 
-	logger.Printf("CampusKeeper v%s 启动；账号 %s；运营商 %s；外网检测 %s；链路核查 %s；退避每天 06:00 清零", config.AppVersion, config.Mask(cfg.Account), cfg.OperatorName(), healthInterval, linkInterval)
+	logger.Printf("CampusKeeper v%s 启动；账号 %s；运营商 %s；外网检测 %s；链路核查 %s；退避每天 %02d:%02d 清零", config.AppVersion, config.Mask(cfg.Account), cfg.OperatorName(), c.policy.HealthInterval, c.policy.LinkInterval, c.policy.DailyResetHour, c.policy.DailyResetMinute)
 	if *once {
 		if err := c.cycle(ctx, "手动单次检测"); err != nil {
 			logger.Printf("本次检查未恢复：%v", err)
@@ -170,14 +148,15 @@ func main() {
 }
 
 func (c *controller) run(ctx context.Context) error {
+	p := c.getPolicy()
 	networkEvents, closeNotifier, err := network.StartNetworkNotifications()
 	if err != nil {
-		c.logger.Printf("Windows 网络通知不可用，使用 %s 链路核查兜底：%v", linkInterval, err)
+		c.logger.Printf("Windows 网络通知不可用，使用 %s 链路核查兜底：%v", p.LinkInterval, err)
 	}
 	linkChanges := make(chan network.LinkState, 1)
 	monitorDone := make(chan struct{})
 	go func() {
-		network.MonitorLink(ctx, c.logger, networkEvents, linkChanges, c.portal.Diagnostic(), linkInterval)
+		network.MonitorLink(ctx, c.logger, networkEvents, linkChanges, c.portal.Diagnostic(), p.LinkInterval)
 		close(monitorDone)
 	}()
 	defer func() {
@@ -186,8 +165,8 @@ func (c *controller) run(ctx context.Context) error {
 		}
 		<-monitorDone
 	}()
-	healthTicker := time.NewTicker(healthInterval)
-	statusTicker := time.NewTicker(statusInterval)
+	healthTicker := time.NewTicker(p.HealthInterval)
+	statusTicker := time.NewTicker(p.StatusInterval)
 	sixTimer := time.NewTimer(time.Until(c.nextReset))
 	defer healthTicker.Stop()
 	defer statusTicker.Stop()
@@ -227,7 +206,7 @@ func (c *controller) run(ctx context.Context) error {
 			if c.resetAtSixIfDue() && c.state != "online" {
 				_ = c.cycle(ctx, "06:00 退避清零")
 			}
-			if !c.quiet && (c.state != "online" || time.Since(c.lastStatusLog) >= onlineStatusInterval) {
+			if !c.quiet && (c.state != "online" || time.Since(c.lastStatusLog) >= p.OnlineStatusInterval) {
 				c.logger.Printf("当前状态：%s", c.status())
 				c.lastStatusLog = time.Now()
 			}
@@ -242,6 +221,7 @@ func (c *controller) run(ctx context.Context) error {
 }
 
 func (c *controller) cycle(ctx context.Context, reason string) error {
+	p := c.getPolicy()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -288,12 +268,12 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	// are already a definitive sign of unauthenticated IPv4 access.
 	if result.Redirect == "" {
 		if !c.quiet {
-			c.logger.Printf("网络探测异常，2 秒后复核：%s", result.Reason)
+			c.logger.Printf("网络探测异常，%v 后复核：%s", p.LinkDebounce, result.Reason)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(p.LinkDebounce):
 		}
 		second := c.portal.Probe(ctx)
 		if err := ctx.Err(); err != nil {
@@ -337,7 +317,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		_, gwMac, gwErr := campus.GatewayFingerprint(c.link.Index)
 		if gwErr != nil || gwMac == "" {
 			c.deadGatewayCount++
-			if c.deadGatewayCount >= 2 && time.Since(c.lastWiFiReset) >= 60*time.Second {
+			if c.deadGatewayCount >= p.DeadGatewayThreshold && time.Since(c.lastWiFiReset) >= p.WiFiResetCooldown {
 				c.logger.Printf("检测到 Wi-Fi 网关无响应（连续 %d 次无 ARP 邻居），执行断开重连以漫游至健康 AP", c.deadGatewayCount)
 				c.deadGatewayCount = 0
 				c.lastWiFiReset = time.Now()
@@ -427,11 +407,11 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return err
 	}
 	c.logger.Print("认证接口已响应，正在核验网络")
-	for i := 0; i < 5; i++ {
+	for i := 0; i < p.PostAuthVerifyAttempts; i++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(3 * time.Second):
+		case <-time.After(p.PostAuthVerifyInterval):
 		}
 		verified := c.portal.Probe(ctx)
 		if err := ctx.Err(); err != nil {
@@ -624,6 +604,7 @@ func stateName(s string) string {
 }
 
 func (c *controller) scheduleRetry(reason string) {
+	p := c.getPolicy()
 	now := time.Now()
 	if c.failureStart.IsZero() {
 		c.failureStart = now
@@ -631,17 +612,17 @@ func (c *controller) scheduleRetry(reason string) {
 	elapsed := now.Sub(c.failureStart)
 
 	var delay time.Duration
-	if elapsed < fastRetryWindow {
-		// 1~3 分钟初始快速重试期：固定短间隔重试，避免人在现场等待时进入退避
-		delay = retryBase + time.Duration(rand.Int63n(int64(time.Second)+1))
-		c.backoff = retryBase
-		remaining := (fastRetryWindow - elapsed).Round(time.Second)
+	if elapsed < p.FastRetryWindow {
+		// 初始快速重试期：固定短间隔重试，避免人在现场等待时进入退避
+		delay = p.RetryBase + time.Duration(rand.Int63n(int64(time.Second)+1))
+		c.backoff = p.RetryBase
+		remaining := (p.FastRetryWindow - elapsed).Round(time.Second)
 		c.logger.Printf("%s；%s 后重试（初始快速重试期，剩余 %s）", reason, delay.Round(time.Second), remaining)
 	} else {
 		// 连续失败超过初始快速期后，进入指数退避以保护无人值守或远程电脑
-		delay = min(c.backoff+time.Duration(rand.Int63n(int64(c.backoff/5)+1)), retryMax)
-		c.logger.Printf("%s；%s 后重试（已进入退避保护，上限 %s）", reason, delay.Round(time.Second), retryMax)
-		c.backoff = min(c.backoff*2, retryMax)
+		delay = min(c.backoff+time.Duration(rand.Int63n(int64(c.backoff/5)+1)), p.RetryMax)
+		c.logger.Printf("%s；%s 后重试（已进入退避保护，上限 %s）", reason, delay.Round(time.Second), p.RetryMax)
+		c.backoff = min(c.backoff*2, p.RetryMax)
 	}
 
 	c.nextRetry = now.Add(delay)
@@ -682,23 +663,24 @@ func (c *controller) ensureWiFi() error {
 }
 
 func (c *controller) scheduleWiFiRetry(grow bool) {
+	p := c.getPolicy()
 	now := time.Now()
 	if c.wifiFailureStart.IsZero() {
 		c.wifiFailureStart = now
 	}
 	elapsed := now.Sub(c.wifiFailureStart)
 
-	delay := 10 * time.Second
+	delay := p.WiFiInitialDelay
 	if grow {
-		if elapsed < fastRetryWindow {
-			delay = 10 * time.Second
-			c.wifiBackoff = retryBase
-			remaining := (fastRetryWindow - elapsed).Round(time.Second)
-			c.logger.Printf("Wi-Fi 连接异常；10s 后重试（初始快速重试期，剩余 %s）", remaining)
+		if elapsed < p.FastRetryWindow {
+			delay = p.WiFiInitialDelay
+			c.wifiBackoff = p.RetryBase
+			remaining := (p.FastRetryWindow - elapsed).Round(time.Second)
+			c.logger.Printf("Wi-Fi 连接异常；%s 后重试（初始快速重试期，剩余 %s）", delay.Round(time.Second), remaining)
 		} else {
 			delay = c.wifiBackoff
-			c.logger.Printf("Wi-Fi 连接异常；%s 后重试（已进入退避保护，上限 %s）", delay.Round(time.Second), retryMax)
-			c.wifiBackoff = min(c.wifiBackoff*2, retryMax)
+			c.logger.Printf("Wi-Fi 连接异常；%s 后重试（已进入退避保护，上限 %s）", delay.Round(time.Second), p.RetryMax)
+			c.wifiBackoff = min(c.wifiBackoff*2, p.RetryMax)
 		}
 	}
 	c.nextWiFiTry = now.Add(delay)
@@ -710,7 +692,7 @@ func (c *controller) scheduleWiFiRetry(grow bool) {
 }
 
 func (c *controller) resetWiFiRetry() {
-	c.wifiBackoff = retryBase
+	c.wifiBackoff = c.getPolicy().RetryBase
 	c.nextWiFiTry = time.Time{}
 	c.wifiFailureStart = time.Time{}
 	c.wifiChannel = nil
@@ -744,7 +726,7 @@ func (c *controller) detectCampusFromLink() {
 }
 
 func (c *controller) resetRetry() {
-	c.backoff = retryBase
+	c.backoff = c.getPolicy().RetryBase
 	c.nextRetry = time.Time{}
 	c.failureStart = time.Time{}
 	c.retryChannel = nil
@@ -756,12 +738,13 @@ func (c *controller) resetAtSixIfDue() bool {
 	if now.Before(c.nextReset) {
 		return false
 	}
-	c.backoff = retryBase
-	c.wifiBackoff = retryBase
+	p := c.getPolicy()
+	c.backoff = p.RetryBase
+	c.wifiBackoff = p.RetryBase
 	c.failureStart = time.Time{}
 	c.wifiFailureStart = time.Time{}
-	c.nextReset = nextSix(now)
-	c.logger.Printf("已到每天 06:00：指数退避清零；下次清零时间 %s", c.nextReset.Format("2006-01-02 15:04"))
+	c.nextReset = c.nextDailyReset(now)
+	c.logger.Printf("已到每天 %02d:%02d：指数退避清零；下次清零时间 %s", p.DailyResetHour, p.DailyResetMinute, c.nextReset.Format("2006-01-02 15:04"))
 	if !c.nextRetry.IsZero() {
 		c.nextRetry = time.Time{}
 		c.retryChannel = nil
@@ -773,14 +756,4 @@ func (c *controller) resetAtSixIfDue() bool {
 		stopTimer(c.wifiTimer)
 	}
 	return true
-}
-
-func nextSix(now time.Time) time.Time {
-	china := time.FixedZone("Asia/Shanghai", 8*3600)
-	local := now.In(china)
-	next := time.Date(local.Year(), local.Month(), local.Day(), 6, 0, 0, 0, china)
-	if !next.After(local) {
-		next = next.AddDate(0, 0, 1)
-	}
-	return next
 }
