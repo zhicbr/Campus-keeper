@@ -13,10 +13,10 @@
 默认在系统托盘运行，不显示终端：
 
 ```powershell
-Start-Process .\wenchang-campus-keeper.exe
+Start-Process .\bin\wenchang-campus-keeper.exe
 ```
 
-双击托盘图标可显示或隐藏日志窗口；点击日志窗口右上角的 × 只会隐藏窗口。只有右键托盘图标选择“退出程序”才会停止程序。启动时直接显示日志窗口可运行 `Start-Process .\wenchang-campus-keeper.exe -ArgumentList '-console'`。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 20 秒检查一次 IPv4 外网。外网正常时约每分钟记录一条状态，不重复记录每次正常检查；断网时保持较密集的状态输出。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。无线网卡短暂消失会先等待 2 秒复核。断网后才会向认证接口提交账号密码。
+双击托盘图标可显示或隐藏日志窗口；点击日志窗口右上角的 × 只会隐藏窗口。只有右键托盘图标选择“退出程序”才会停止程序。启动时直接显示日志窗口可运行 `Start-Process .\bin\wenchang-campus-keeper.exe -ArgumentList '-console'`。程序会在网卡断开、重新接入、取得 IPv4 地址时报告变化；每 20 秒检查一次 IPv4 外网。外网正常时约每分钟记录一条状态，不重复记录每次正常检查；断网时保持较密集的状态输出。Windows 的网络变化通知用于及时唤醒，另有每 5 秒的本地网卡核查兜底。无线网卡短暂消失会先等待 2 秒复核。断网后才会向认证接口提交账号密码。
 
 ## 重试和恢复
 
@@ -31,32 +31,26 @@ Start-Process .\wenchang-campus-keeper.exe
 
 ## 开机常驻
 
-完成本机断网验证后，在当前用户的 PowerShell 运行：
+右键系统托盘图标点击“账号设置”，勾选“开机自启”并点击保存即可。程序会自动将自身路径注册到当前用户的 Windows 开机自启列表（`HKCU\...\Run`）中；若移动了程序目录，再次勾选保存即可自动修复路径。
 
-```powershell
-.\scripts\install-task.ps1 -StartNow
-```
-
-这会创建 `WenchangCampusKeeper` 计划任务，在当前用户登录 Windows 后运行并显示托盘图标；程序异常退出时任务尝试重启，每天 06:05 还有一次补启动触发。后台使用 `-quiet`，仅记录状态变化和操作，减少日志量。托盘图标需要该用户保持登录。
-
-查看任务：`Get-ScheduledTask -TaskName WenchangCampusKeeper`。停止：`Stop-ScheduledTask -TaskName WenchangCampusKeeper`。计划任务与手动运行不可同时启动，程序用单实例锁防止重复登录。
+后台默认使用 `-quiet` 模式，仅记录状态变化和关键操作，减少日志量。
 
 远程使用期间，电脑需保持通电且不进入睡眠。有线断开后程序可转接已保存的 Wi-Fi，但切换、DHCP 和认证期间仍会短暂断网，远程会话能否自动恢复取决于远程软件。
 
-日志写在同目录 `keeper.log`，达到 5 MiB 后归档为带时间戳的文件，不自动永久删除。`.env`、日志、可执行文件和缓存均已加入 `.gitignore`。
+日志写在 `%APPDATA%\.campus-keeper\keeper.log`，达到 5 MiB 后归档为带时间戳的文件。`.env`、日志、可执行文件和缓存均已加入 `.gitignore`。
 
 ## 构建与版本管理
 
 程序的版本号统一在根目录的 `VERSION` 文件中维护（只需修改其中的纯文本版本号，无需改动任何 Go 代码）：
 
 ```powershell
-# 方式一：一键自动构建（自动读取 VERSION 并注入编译）
+# 方式一：一键自动构建（自动读取 VERSION 并输出到 bin/）
 .\build.ps1
 
 # 方式二：标准命令行手动构建
 $version = (Get-Content .\VERSION -Raw).Trim()
 go test ./...
-go build -buildvcs=false -ldflags="-H=windowsgui -s -w -X 'wenchang-campus-keeper/internal/config.AppVersion=$version'" -o .\wenchang-campus-keeper.exe .\cmd\keeper
+go build -buildvcs=false -ldflags="-H=windowsgui -s -w -X 'wenchang-campus-keeper/internal/config.AppVersion=$version'" -o .\bin\wenchang-campus-keeper.exe .\cmd\keeper
 ```
 
 > **注意**：必须使用 `-ldflags="-H=windowsgui"` 参数将程序标记为 Windows GUI 子系统，否则双击运行时 Windows 会自动附带弹出黑色控制台终端窗口。

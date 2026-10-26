@@ -18,11 +18,15 @@ if (-not $SkipTest) {
 }
 
 Write-Host "Building CampusKeeper v$version..." -ForegroundColor Cyan
-$targetExe = Join-Path $rootDir "wenchang-campus-keeper.exe"
+$binDir = Join-Path $rootDir "bin"
+if (-not (Test-Path $binDir)) {
+    New-Item -ItemType Directory -Path $binDir | Out-Null
+}
+$targetExe = Join-Path $binDir "wenchang-campus-keeper.exe"
 $pkg = Join-Path $rootDir "cmd\keeper"
 
 & go build -buildvcs=false "-ldflags=-H=windowsgui -s -w -X wenchang-campus-keeper/internal/config.AppVersion=$version" -o $targetExe $pkg
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "Build successful: wenchang-campus-keeper.exe (v$version)" -ForegroundColor Green
+    Write-Host "Build successful: bin\wenchang-campus-keeper.exe (v$version)" -ForegroundColor Green
 }

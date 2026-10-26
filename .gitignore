@@ -4,6 +4,7 @@
 keeper.log.*
 network-diagnostic.log.*
 network-diagnostics-*.zip
+bin/
 *.exe
 *.exe~
 .gocache/
