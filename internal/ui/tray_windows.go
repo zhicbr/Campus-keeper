@@ -19,6 +19,7 @@ import (
 	webview2 "github.com/jchv/go-webview2"
 	"github.com/jchv/go-webview2/webviewloader"
 
+	"wenchang-campus-keeper/internal/cloud"
 	"wenchang-campus-keeper/internal/config"
 	"wenchang-campus-keeper/internal/diagnostics"
 )
@@ -152,10 +153,16 @@ type DashboardInfo struct {
 
 // TrayCallbacks encapsulates application callbacks required by the tray UI.
 type TrayCallbacks struct {
-	Quit       func()
-	Reconnect  func()
-	GetConfig  func() config.Config
-	SaveConfig func(account, password, opStr string) (changed bool, err error)
+	Quit              func()
+	Reconnect         func()
+	GetConfig         func() config.Config
+	SaveConfig        func(account, password, opStr string) (changed bool, err error)
+	SwitchMode        func(mode config.ActiveMode, shareCode string) error
+	PublishShare      func(memo string, durationHours int) (shareCode string, err error)
+	RevokeShare       func(shareID string) error
+	ListMyShares      func() ([]cloud.ShareSummary, error)
+	SaveFriendShare   func(name, shareCode string) error
+	DeleteFriendShare func(id string) error
 }
 
 type TrayUI struct {
@@ -460,9 +467,12 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 	})
 
 	type jsConfig struct {
-		Account     string `json:"account"`
-		HasPassword bool   `json:"hasPassword"`
-		Operator    string `json:"operator"`
+		ActiveMode      string                   `json:"activeMode"`
+		Account         string                   `json:"account"`
+		HasPassword     bool                     `json:"hasPassword"`
+		Operator        string                   `json:"operator"`
+		FriendShareCode string                   `json:"friendShareCode"`
+		FriendShares    []config.FriendShareItem `json:"friendShares"`
 	}
 	wv.Bind("getConfig", func() (jsConfig, error) {
 		var res jsConfig
@@ -470,29 +480,102 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 			return res, errors.New("配置服务未就绪")
 		}
 		cfg := t.cb.GetConfig()
+		res.ActiveMode = string(cfg.ActiveMode)
+		if res.ActiveMode == "" {
+			res.ActiveMode = string(config.ModeSelf)
+		}
 		res.Account = strings.TrimSpace(cfg.Account)
 		res.HasPassword = strings.TrimSpace(cfg.Password) != ""
 		res.Operator = cfg.OperatorName()
+		res.FriendShareCode = cfg.FriendShareCode
+		res.FriendShares = cfg.FriendShares
 		return res, nil
 	})
 
 	type jsDashboard struct {
-		Status   string `json:"status"`
-		Network  string `json:"network"`
-		Operator string `json:"operator"`
-		IP       string `json:"ip"`
-		IsCampus bool   `json:"isCampus"`
+		Status     string `json:"status"`
+		Network    string `json:"network"`
+		Operator   string `json:"operator"`
+		IP         string `json:"ip"`
+		IsCampus   bool   `json:"isCampus"`
+		ActiveMode string `json:"activeMode"`
 	}
 	wv.Bind("getDashboard", func() (jsDashboard, error) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
+		mode := string(config.ModeSelf)
+		if t.cb.GetConfig != nil {
+			cfg := t.cb.GetConfig()
+			if cfg.ActiveMode != "" {
+				mode = string(cfg.ActiveMode)
+			}
+		}
 		return jsDashboard{
-			Status:   t.dash.Status,
-			Network:  t.dash.Network,
-			Operator: t.dash.Operator,
-			IP:       t.dash.IP,
-			IsCampus: t.dash.IsCampus,
+			Status:     t.dash.Status,
+			Network:    t.dash.Network,
+			Operator:   t.dash.Operator,
+			IP:         t.dash.IP,
+			IsCampus:   t.dash.IsCampus,
+			ActiveMode: mode,
 		}, nil
+	})
+
+	wv.Bind("switchMode", func(mode string, friendShareCode string) (bool, error) {
+		if t.cb.SwitchMode == nil {
+			return false, errors.New("模式切换服务未就绪")
+		}
+		err := t.cb.SwitchMode(config.ActiveMode(mode), friendShareCode)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+
+	wv.Bind("publishShare", func(memo string, durationHours int) (string, error) {
+		if t.cb.PublishShare == nil {
+			return "", errors.New("分享服务未就绪")
+		}
+		return t.cb.PublishShare(memo, durationHours)
+	})
+
+	wv.Bind("revokeShare", func(shareID string) (bool, error) {
+		if t.cb.RevokeShare == nil {
+			return false, errors.New("吊销服务未就绪")
+		}
+		err := t.cb.RevokeShare(shareID)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+
+	wv.Bind("listMyShares", func() ([]cloud.ShareSummary, error) {
+		if t.cb.ListMyShares == nil {
+			return nil, errors.New("列表服务未就绪")
+		}
+		return t.cb.ListMyShares()
+	})
+
+	wv.Bind("saveFriendShare", func(name, shareCode string) (bool, error) {
+		if t.cb.SaveFriendShare == nil {
+			return false, errors.New("保存服务未就绪")
+		}
+		err := t.cb.SaveFriendShare(name, shareCode)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+
+	wv.Bind("deleteFriendShare", func(id string) (bool, error) {
+		if t.cb.DeleteFriendShare == nil {
+			return false, errors.New("删除服务未就绪")
+		}
+		err := t.cb.DeleteFriendShare(id)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
 	})
 
 	wv.Bind("getLogs", func() (string, error) {

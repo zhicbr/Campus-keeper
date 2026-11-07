@@ -243,7 +243,7 @@ func TestResolveConfigUpdate(t *testing.T) {
 					t.Fatalf("ResolveConfigUpdate() error = %v, wantErr = %v", err, tt.wantErr)
 				}
 				// Assert zero value on error
-				if (res.NewConfig != Config{} || res.Changed) {
+				if res.NewConfig.Account != "" || res.NewConfig.Password != "" || res.Changed {
 					t.Fatalf("ResolveConfigUpdate() expected zero ConfigUpdateResult on error, got: %+v", res)
 				}
 				return

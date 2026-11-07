@@ -60,7 +60,7 @@ const appHTML = `<!DOCTYPE html>
   .window-wrapper {
     width: 100%;
     height: 100%;
-    padding: 16px 22px;
+    padding: 14px 18px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -72,7 +72,7 @@ const appHTML = `<!DOCTYPE html>
     align-items: center;
     justify-content: space-between;
     height: 34px;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
     flex-shrink: 0;
   }
   .segmented-nav {
@@ -81,7 +81,7 @@ const appHTML = `<!DOCTYPE html>
     padding: 3px;
     border-radius: 6px;
     height: 32px;
-    width: 220px;
+    width: 330px;
     flex-shrink: 0;
   }
   .nav-item {
@@ -89,7 +89,7 @@ const appHTML = `<!DOCTYPE html>
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
     border: none;
@@ -134,20 +134,21 @@ const appHTML = `<!DOCTYPE html>
     display: none;
     flex-direction: column;
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
   .view-panel.active {
     display: flex;
   }
 
-  /* Fluent Settings Card */
+  /* Fluent Cards */
   .settings-container {
     width: 100%;
-    max-width: 540px;
+    max-width: 580px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
   }
   .fluent-card {
     background: var(--card-bg);
@@ -156,12 +157,22 @@ const appHTML = `<!DOCTYPE html>
     overflow: hidden;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
   }
+  .card-header {
+    padding: 10px 16px;
+    font-size: 12.5px;
+    font-weight: 600;
+    background: #fafafa;
+    border-bottom: 1px solid #f0f0f0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
   .setting-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 0 16px;
-    height: 38px;
+    height: 40px;
     border-bottom: 1px solid #f2f2f2;
   }
   .setting-row:last-child {
@@ -171,7 +182,7 @@ const appHTML = `<!DOCTYPE html>
     font-size: 13px;
     font-weight: 500;
     color: var(--text-primary);
-    width: 100px;
+    width: 110px;
     flex-shrink: 0;
   }
   .control-wrapper {
@@ -181,14 +192,14 @@ const appHTML = `<!DOCTYPE html>
     align-items: center;
   }
   .fluent-input {
-    width: 260px;
-    height: 32px;
+    width: 270px;
+    height: 30px;
     background: #ffffff;
     border: 1px solid var(--border-control);
     border-bottom: 1px solid #999999;
     border-radius: 4px;
     padding: 0 10px;
-    font-size: 13px;
+    font-size: 12.5px;
     color: var(--text-primary);
     font-family: inherit;
     outline: none;
@@ -196,65 +207,64 @@ const appHTML = `<!DOCTYPE html>
     -webkit-user-select: text;
     transition: all 0.1s ease;
   }
-  .fluent-input:hover {
-    border-color: var(--border-control-hover);
-  }
   .fluent-input:focus {
     border-color: var(--accent);
     border-bottom-width: 2px;
   }
-  .fluent-input::placeholder {
-    color: var(--text-muted);
-    font-size: 12px;
+
+  .mode-radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px;
   }
-  .fluent-input:disabled {
-    background: #f7f7f7;
-    color: var(--text-muted);
-    cursor: not-allowed;
-  }
-  select.fluent-input {
+  .mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
     cursor: pointer;
-    padding-right: 24px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    transition: all 0.1s;
+  }
+  .mode-option:hover {
+    background: #f7f7f7;
+  }
+  .mode-option.selected {
+    background: #edf5fc;
+    border-color: #b9d8f3;
+  }
+  .mode-desc {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-top: 2px;
   }
 
   .info-bar {
-    background: #fafafa;
     display: flex;
-    align-items: center;
     justify-content: space-between;
-    padding: 0 16px;
-    height: 32px;
-    font-size: 12px;
-    color: var(--text-muted);
+    align-items: center;
+    padding: 10px 16px;
+    background: #fafafa;
     border-top: 1px solid #f2f2f2;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
   .info-val {
-    font-family: "Cascadia Code", "Consolas", monospace;
-    color: var(--text-secondary);
     font-weight: 500;
+    color: var(--text-primary);
   }
 
-
-  /* Action Buttons */
-  .footer-actions {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    margin-top: 14px;
-    margin-bottom: 2px;
-  }
-  .action-buttons {
-    display: flex;
-    gap: 10px;
-  }
+  /* Buttons */
   .fluent-btn {
     height: 32px;
-    padding: 0 18px;
-    border-radius: 4px;
-    font-size: 13px;
+    padding: 0 16px;
+    font-size: 12.5px;
     font-weight: 500;
-    cursor: pointer;
+    border-radius: 4px;
     border: 1px solid transparent;
+    cursor: pointer;
     font-family: inherit;
     display: inline-flex;
     align-items: center;
@@ -272,9 +282,6 @@ const appHTML = `<!DOCTYPE html>
   .fluent-btn-primary:not(:disabled):hover {
     background: var(--accent-hover);
   }
-  .fluent-btn-primary:not(:disabled):active {
-    background: var(--accent-active);
-  }
   .fluent-btn-secondary {
     background: #ffffff;
     color: var(--text-primary);
@@ -283,10 +290,54 @@ const appHTML = `<!DOCTYPE html>
   }
   .fluent-btn-secondary:not(:disabled):hover {
     background: #fbfbfb;
-    border-color: var(--border-control-hover);
   }
-  .fluent-btn-secondary:active {
-    background: #f5f5f5;
+  .fluent-btn-danger {
+    background: #ffffff;
+    color: #d13438;
+    border-color: #f1c5c6;
+  }
+  .fluent-btn-danger:hover {
+    background: #fdf3f4;
+  }
+
+  .mini-btn {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 11.5px;
+    background: #ffffff;
+    border: 1px solid var(--border-control);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .mini-btn:hover {
+    background: #f7f7f7;
+    color: var(--text-primary);
+  }
+
+  .footer-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  /* Share list */
+  .share-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .share-table th, .share-table td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .share-table th {
+    background: #fcfcfc;
+    color: var(--text-muted);
+    font-weight: 500;
   }
 
   /* Logs Panel */
@@ -294,35 +345,13 @@ const appHTML = `<!DOCTYPE html>
     height: 100%;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     overflow: hidden;
   }
   .log-top {
     display: flex;
     justify-content: flex-end;
-    align-items: center;
-    flex-shrink: 0;
-  }
-  .log-btns {
-    display: flex;
     gap: 8px;
-  }
-  .mini-btn {
-    height: 28px;
-    padding: 0 12px;
-    font-size: 12px;
-    background: #ffffff;
-    border: 1px solid var(--border-control);
-    border-radius: 4px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-family: inherit;
-    transition: all 0.1s ease;
-  }
-  .mini-btn:hover {
-    background: #f7f7f7;
-    color: var(--text-primary);
-    border-color: var(--border-control-hover);
   }
   .console-box {
     flex: 1;
@@ -333,29 +362,17 @@ const appHTML = `<!DOCTYPE html>
     border-radius: 6px;
     padding: 10px 12px;
     color: #cccccc;
-    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-family: "Cascadia Code", "Consolas", monospace;
     font-size: 11px;
     line-height: 1.42;
-    letter-spacing: -0.2px;
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-all;
     user-select: text;
     -webkit-user-select: text;
-    box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.4);
-  }
-  .console-box::-webkit-scrollbar {
-    width: 8px;
-  }
-  .console-box::-webkit-scrollbar-thumb {
-    background: #444444;
-    border-radius: 4px;
-  }
-  .console-box::-webkit-scrollbar-thumb:hover {
-    background: #555555;
   }
 
-  /* Toast Notification */
+  /* Toast */
   .toast {
     position: fixed;
     bottom: 20px;
@@ -365,7 +382,7 @@ const appHTML = `<!DOCTYPE html>
     color: #ffffff;
     padding: 8px 18px;
     border-radius: 4px;
-    font-size: 12.5px;
+    font-size: 12px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     opacity: 0;
     transition: all 0.2s ease;
@@ -384,8 +401,10 @@ const appHTML = `<!DOCTYPE html>
   <!-- Top Navigation & Status -->
   <div class="top-nav-bar">
     <div class="segmented-nav">
-      <button class="nav-item active" data-tab="settings">账号配置</button>
-      <button class="nav-item" data-tab="logs">运行日志</button>
+      <button class="nav-item active" data-tab="dashboard">控制面板</button>
+      <button class="nav-item" data-tab="account">我的账号</button>
+      <button class="nav-item" data-tab="sharing">好友共享</button>
+      <button class="nav-item" data-tab="logs">系统日志</button>
     </div>
     <div id="statusBadge" class="status-indicator">
       <span class="status-dot"></span>
@@ -393,18 +412,69 @@ const appHTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- VIEW 1: Settings -->
-  <div id="view-settings" class="view-panel active">
+  <!-- VIEW 1: Dashboard & Mode Selection -->
+  <div id="view-dashboard" class="view-panel active">
     <div class="settings-container">
       <div class="fluent-card">
+        <div class="card-header">
+          <span>网络连接与登录模式</span>
+          <span id="activeModeBadge" style="color: var(--accent); font-weight: 500;">自身账号</span>
+        </div>
+        <div class="mode-radio-group">
+          <label class="mode-option selected" id="optSelf">
+            <input type="radio" name="activeMode" value="self" checked style="margin-top: 3px;" />
+            <div>
+              <div style="font-weight: 600;">使用我的账号（本地直连）</div>
+              <div class="mode-desc">直接读取本地加密保存的校园网账号，秒级离线认证，不受云端限制。</div>
+            </div>
+          </label>
+          <label class="mode-option" id="optFriend">
+            <input type="radio" name="activeMode" value="friend" style="margin-top: 3px;" />
+            <div>
+              <div style="font-weight: 600;">借用好友账号（Cloudflare 云端鉴权）</div>
+              <div class="mode-desc">使用好友生成的专属分享码，通过 Cloudflare 安全拉取密文登录，所有者可随时吊销。</div>
+            </div>
+          </label>
+        </div>
+
+        <!-- Friend Share Code input row (only visible in Friend mode) -->
+        <div id="friendInputSection" style="display: none; padding: 10px 16px; background: #fafafa; border-top: 1px solid #f0f0f0;">
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input type="text" id="friendShareCode" class="fluent-input" style="flex: 1;" placeholder="粘贴好友分享码 (CK1.sh_xxxx...)" autocomplete="off" />
+            <button id="btnApplyFriendMode" class="fluent-btn fluent-btn-primary" style="height: 30px;">应用借用</button>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">* 凭据仅在内存中临时解密发包，绝不会在本地明文留存</div>
+        </div>
+
+        <div class="info-bar">
+          <span>当前网络链路</span>
+          <span id="linkInfo" class="info-val">检测中...</span>
+        </div>
+      </div>
+
+      <div class="footer-actions">
+        <button id="btnExit" class="fluent-btn fluent-btn-danger" style="margin-right: auto;">退出程序</button>
+        <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">立即重新连接</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW 2: My Account -->
+  <div id="view-account" class="view-panel">
+    <div class="settings-container">
+      <div class="fluent-card">
+        <div class="card-header">
+          <span>我的校园网凭据配置</span>
+          <span style="font-size: 11px; color: var(--text-muted);">Windows DPAPI 本地硬件加密</span>
+        </div>
         <div class="setting-row">
-          <label class="setting-label" for="account">账号</label>
+          <label class="setting-label" for="account">学号 / 工号</label>
           <div class="control-wrapper">
             <input type="text" id="account" class="fluent-input" placeholder="学号 / 工号" autocomplete="off" spellcheck="false" />
           </div>
         </div>
         <div class="setting-row">
-          <label class="setting-label" for="password">密码</label>
+          <label class="setting-label" for="password">校园网密码</label>
           <div class="control-wrapper">
             <input type="password" id="password" class="fluent-input" placeholder="校园网密码" autocomplete="off" />
           </div>
@@ -421,30 +491,85 @@ const appHTML = `<!DOCTYPE html>
             </select>
           </div>
         </div>
-        <div class="info-bar">
-          <span>当前网络链路</span>
-          <span id="linkInfo" class="info-val">检测中...</span>
-        </div>
       </div>
 
       <div class="footer-actions">
-        <div class="action-buttons" style="display: flex; gap: 8px; width: 100%;">
-          <button id="btnExit" class="fluent-btn fluent-btn-secondary" style="margin-right: auto; color: #d13438;">退出程序</button>
-          <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">重新连接</button>
-          <button id="btnSave" class="fluent-btn fluent-btn-primary">保存配置</button>
+        <button id="btnSaveAccount" class="fluent-btn fluent-btn-primary">保存账号配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW 3: Sharing Hub -->
+  <div id="view-sharing" class="view-panel">
+    <div class="settings-container">
+      <!-- Create Share Card -->
+      <div class="fluent-card">
+        <div class="card-header">
+          <span>借给好友（创建专属分享码）</span>
+          <span style="font-size: 11px; color: var(--text-muted);">Cloudflare Workers + KV 托管</span>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label" for="shareMemo">好友备注</label>
+          <div class="control-wrapper">
+            <input type="text" id="shareMemo" class="fluent-input" placeholder="例如：室友老王的笔记本" autocomplete="off" />
+          </div>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label" for="shareDuration">有效时长</label>
+          <div class="control-wrapper">
+            <select id="shareDuration" class="fluent-input">
+              <option value="24">24 小时 (临时借用)</option>
+              <option value="168" selected>7 天 (一整周)</option>
+              <option value="720">30 天 (整月)</option>
+              <option value="8760">1 年 (长期互助)</option>
+            </select>
+          </div>
+        </div>
+        <div id="newShareResultRow" style="display: none; padding: 10px 16px; background: #edf5fc; border-top: 1px solid #d3e5f5;">
+          <div style="font-size: 11.5px; font-weight: 600; color: var(--accent); margin-bottom: 4px;">分享码已生成，点击复制发给好友：</div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="createdShareCode" class="fluent-input" style="flex: 1; font-family: monospace;" readonly />
+            <button id="btnCopyShareCode" class="fluent-btn fluent-btn-primary" style="height: 30px;">复制</button>
+          </div>
+        </div>
+        <div style="padding: 10px 16px; display: flex; justify-content: flex-end;">
+          <button id="btnCreateShare" class="fluent-btn fluent-btn-primary">生成分享码</button>
+        </div>
+      </div>
+
+      <!-- Manage Shares Card -->
+      <div class="fluent-card">
+        <div class="card-header">
+          <span>我已借出的分享管理</span>
+          <button id="btnRefreshShares" class="mini-btn">刷新云端列表</button>
+        </div>
+        <div style="max-height: 200px; overflow-y: auto;">
+          <table class="share-table">
+            <thead>
+              <tr>
+                <th>备注</th>
+                <th>运营商</th>
+                <th>到期时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="shareTableBody">
+              <tr>
+                <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">暂无活跃的分享</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- VIEW 2: Logs -->
+  <!-- VIEW 4: Logs -->
   <div id="view-logs" class="view-panel">
     <div class="log-view">
       <div class="log-top">
-        <div class="log-btns">
-          <button id="btnClear" class="mini-btn">清空</button>
-          <button id="btnOpenDir" class="mini-btn">数据目录</button>
-        </div>
+        <button id="btnClear" class="mini-btn">清空</button>
+        <button id="btnOpenDir" class="mini-btn">数据目录</button>
       </div>
       <pre id="logConsole" class="console-box"></pre>
     </div>
@@ -456,18 +581,18 @@ const appHTML = `<!DOCTYPE html>
 </div>
 
 <script>
-  // Tab switching
-  let pendingTab = null;
+  // Tab Switching
   function switchTab(name) {
-    pendingTab = name;
     const tabs = document.querySelectorAll('.nav-item');
     const panels = document.querySelectorAll('.view-panel');
-    if (!tabs.length || !panels.length) return;
     tabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === name));
     panels.forEach(p => p.classList.toggle('active', p.id === 'view-' + name));
     if (name === 'logs') {
       const el = document.getElementById('logConsole');
       if (el) el.scrollTop = el.scrollHeight;
+    }
+    if (name === 'sharing') {
+      loadMyShares();
     }
   }
   window.switchTab = switchTab;
@@ -476,25 +601,7 @@ const appHTML = `<!DOCTYPE html>
     btn.addEventListener('click', () => switchTab(btn.getAttribute('data-tab')));
   });
 
-  let savedAccount = '';
-  let hasSavedPassword = false;
-
-  function updatePasswordPlaceholder() {
-    const curAcc = document.getElementById('account').value.trim();
-    const pwdEl = document.getElementById('password');
-    const isDifferent = Boolean(savedAccount && curAcc.toLowerCase() !== savedAccount.toLowerCase());
-    if (!hasSavedPassword || isDifferent) {
-      pwdEl.placeholder = (savedAccount && isDifferent)
-        ? '请输入新密码'
-        : '校园网密码';
-    } else {
-      pwdEl.placeholder = '●●●●●●●● (留空保持原密码)';
-    }
-  }
-
-  document.getElementById('account').addEventListener('input', updatePasswordPlaceholder);
-
-  // Toast
+  // Toast Helper
   let toastTimer = null;
   function showToast(msg) {
     const toast = document.getElementById('toast');
@@ -504,7 +611,7 @@ const appHTML = `<!DOCTYPE html>
     toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
   }
 
-  // Dashboard update
+  // Dashboard Status Sync
   window.onStatusUpdate = function(dash) {
     if (!dash) return;
     const badge = document.getElementById('statusBadge');
@@ -515,9 +622,9 @@ const appHTML = `<!DOCTYPE html>
     badgeText.innerText = status;
 
     badge.className = 'status-indicator';
-    if (status.includes('正常') || status.includes('已连接') || status.includes('在线')) {
+    if (status.includes('正常') || status.includes('已连接') || status.includes('在线') || status.includes('已连通')) {
       // online
-    } else if (status.includes('重试') || status.includes('中') || status.includes('正在')) {
+    } else if (status.includes('重试') || status.includes('中') || status.includes('正在') || status.includes('检测')) {
       badge.classList.add('busy');
     } else {
       badge.classList.add('offline');
@@ -528,12 +635,12 @@ const appHTML = `<!DOCTYPE html>
     linkInfo.innerText = net + ' · ' + ip;
   };
 
-  // Logs append
+  // Logs stream
   const logConsole = document.getElementById('logConsole');
   window.onNewLog = function(chunk) {
     logConsole.innerText += chunk;
-    if (logConsole.innerText.length > 40000) {
-      logConsole.innerText = logConsole.innerText.slice(-30000);
+    if (logConsole.innerText.length > 50000) {
+      logConsole.innerText = logConsole.innerText.slice(-35000);
     }
     logConsole.scrollTop = logConsole.scrollHeight;
   };
@@ -547,123 +654,194 @@ const appHTML = `<!DOCTYPE html>
     if (window.openDataDir) window.openDataDir();
   });
 
-  function setSavingState(saving) {
-    document.getElementById('account').disabled = saving;
-    document.getElementById('password').disabled = saving;
-    document.getElementById('operator').disabled = saving;
-    const btn = document.getElementById('btnSave');
-    btn.disabled = saving;
-    btn.innerText = saving ? '保存中...' : '保存配置';
+  document.getElementById('btnReconnect').addEventListener('click', async () => {
+    if (window.reconnect) {
+      await window.reconnect();
+      showToast('已请求重新检测连接');
+    }
+  });
+
+  document.getElementById('btnExit').addEventListener('click', async () => {
+    if (confirm('确定要退出校园网守护程序吗？退出后将停止自动保活。')) {
+      if (window.exitApp) await window.exitApp();
+    }
+  });
+
+  // Mode Selection Interaction
+  function updateModeSelection(mode) {
+    const isSelf = mode === 'self';
+    document.getElementById('optSelf').classList.toggle('selected', isSelf);
+    document.getElementById('optFriend').classList.toggle('selected', !isSelf);
+    document.getElementById('friendInputSection').style.display = isSelf ? 'none' : 'block';
+    document.getElementById('activeModeBadge').innerText = isSelf ? '自身账号 (本地)' : '借用好友 (云端)';
+    document.getElementById('activeModeBadge').style.color = isSelf ? 'var(--accent)' : '#b45309';
   }
 
-  // Save config
-  document.getElementById('btnSave').addEventListener('click', async () => {
-    const accInput = document.getElementById('account');
-    const pwdInput = document.getElementById('password');
-    const opInput = document.getElementById('operator');
+  document.querySelectorAll('input[name="activeMode"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      const mode = e.target.value;
+      updateModeSelection(mode);
+      if (mode === 'self') {
+        if (window.switchMode) {
+          window.switchMode('self', '').then(() => showToast('已切换至自身账号登录'));
+        }
+      }
+    });
+  });
 
-    const acc = accInput.value.trim();
-    const pwd = pwdInput.value;
-    const op = opInput.value;
-
-    if (!acc) {
-      showToast('请填写账号');
+  document.getElementById('btnApplyFriendMode').addEventListener('click', async () => {
+    const code = document.getElementById('friendShareCode').value.trim();
+    if (!code) {
+      showToast('请输入好友分享码');
       return;
     }
+    try {
+      if (window.switchMode) {
+        await window.switchMode('friend', code);
+        showToast('已切换至借用模式，正在连接云端鉴权...');
+      }
+    } catch(err) {
+      alert('切换失败: ' + err);
+    }
+  });
 
-    setSavingState(true);
+  // Account Saving
+  let savedAccount = '';
+  let hasSavedPassword = false;
+
+  function updatePasswordPlaceholder() {
+    const curAcc = document.getElementById('account').value.trim();
+    const pwdEl = document.getElementById('password');
+    const isDifferent = Boolean(savedAccount && curAcc.toLowerCase() !== savedAccount.toLowerCase());
+    if (!hasSavedPassword || isDifferent) {
+      pwdEl.placeholder = (savedAccount && isDifferent) ? '请输入新密码' : '校园网密码';
+    } else {
+      pwdEl.placeholder = '●●●●●●●● (留空保持原密码)';
+    }
+  }
+  document.getElementById('account').addEventListener('input', updatePasswordPlaceholder);
+
+  document.getElementById('btnSaveAccount').addEventListener('click', async () => {
+    const account = document.getElementById('account').value.trim();
+    const password = document.getElementById('password').value;
+    const operator = document.getElementById('operator').value;
+    if (!account) {
+      showToast('请输入账号');
+      return;
+    }
+    if (!operator) {
+      showToast('请选择运营商');
+      return;
+    }
     try {
       if (window.saveConfig) {
-        const changed = await window.saveConfig(acc, pwd, op);
-        if (!changed) {
-          showToast('配置未做更改');
-          return;
-        }
-        savedAccount = acc;
-        hasSavedPassword = true;
-        pwdInput.value = '';
+        const changed = await window.saveConfig(account, password, operator);
+        savedAccount = account;
+        hasSavedPassword = hasSavedPassword || Boolean(password);
+        document.getElementById('password').value = '';
         updatePasswordPlaceholder();
-        showToast('配置已保存');
+        showToast(changed ? '账号配置已保存，正在重新核验' : '配置未变更');
       }
-    } catch (e) {
-      const msg = (e && e.message) ? e.message : String(e);
-      if (msg.includes('不能为空') || msg.includes('必须输入') || msg.includes('未知运营商')) {
-        showToast(msg);
-      } else {
-        showToast('保存失败: ' + msg);
-      }
-    } finally {
-      setSavingState(false);
+    } catch(err) {
+      alert('保存失败: ' + err);
     }
   });
 
-  // Reconnect
-  document.getElementById('btnExit').addEventListener('click', async () => {
-    if (confirm('确定要彻底退出校园网守护程序吗？退出后将停止自动保活。')) {
-      if (window.exitApp) window.exitApp();
-    }
-  });
-
-  document.getElementById('btnReconnect').addEventListener('click', async () => {
+  // Sharing Hub
+  document.getElementById('btnCreateShare').addEventListener('click', async () => {
+    const memo = document.getElementById('shareMemo').value.trim() || '好友分享';
+    const hours = parseInt(document.getElementById('shareDuration').value, 10) || 168;
     try {
-      if (window.reconnect) {
-        await window.reconnect();
-        showToast('已发送重连请求');
+      if (window.publishShare) {
+        const code = await window.publishShare(memo, hours);
+        document.getElementById('createdShareCode').value = code;
+        document.getElementById('newShareResultRow').style.display = 'block';
+        showToast('分享码创建成功');
+        loadMyShares();
       }
-    } catch (e) {
-      showToast('重连失败: ' + e);
+    } catch(err) {
+      alert('生成分享码失败: ' + err);
     }
   });
 
-  // Hotkeys
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      if (window.hideWindow) window.hideWindow();
-    } else if (e.key === 'Enter' && (e.target.id === 'account' || e.target.id === 'password')) {
-      document.getElementById('btnSave').click();
-    }
+  document.getElementById('btnCopyShareCode').addEventListener('click', () => {
+    const input = document.getElementById('createdShareCode');
+    input.select();
+    navigator.clipboard.writeText(input.value).then(() => {
+      showToast('分享码已复制到剪贴板！');
+    });
   });
 
-  // Refresh all state
-  async function refreshAll() {
+  async function loadMyShares() {
+    if (!window.listMyShares) return;
+    try {
+      const shares = await window.listMyShares();
+      const tbody = document.getElementById('shareTableBody');
+      if (!shares || !shares.length) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">暂无活跃的分享</td></tr>';
+        return;
+      }
+      tbody.innerHTML = shares.map(s => {
+        const exp = new Date(s.expiresAt).toLocaleDateString();
+        return '<tr>' +
+          '<td><b>' + (s.memo || '未命名') + '</b></td>' +
+          '<td>' + (s.operator || '移动') + '</td>' +
+          '<td>' + exp + '</td>' +
+          '<td><button class="mini-btn" style="color:#d13438;" onclick="revokeShareItem(\'' + s.shareId + '\')">吊销</button></td>' +
+        '</tr>';
+      }).join('');
+    } catch(err) {
+      console.error('加载分享列表失败:', err);
+    }
+  }
+  document.getElementById('btnRefreshShares').addEventListener('click', loadMyShares);
+
+  window.revokeShareItem = async function(shareId) {
+    if (!confirm('确定要吊销此分享吗？吊销后对方将立即无法继续使用你的账号联网。')) return;
+    try {
+      if (window.revokeShare) {
+        await window.revokeShare(shareId);
+        showToast('已成功吊销该分享');
+        loadMyShares();
+      }
+    } catch(err) {
+      alert('吊销失败: ' + err);
+    }
+  };
+
+  // Initial Data Load
+  (async function init() {
     try {
       if (window.getConfig) {
         const cfg = await window.getConfig();
-        if (cfg) {
-          savedAccount = (cfg.account || '').trim();
-          hasSavedPassword = !!cfg.hasPassword;
-          document.getElementById('account').value = savedAccount;
-          if (cfg.operator) document.getElementById('operator').value = cfg.operator;
-          document.getElementById('password').value = '';
-          updatePasswordPlaceholder();
-        }
+        document.getElementById('account').value = cfg.account || '';
+        document.getElementById('operator').value = cfg.operator || '移动';
+        document.getElementById('friendShareCode').value = cfg.friendShareCode || '';
+        savedAccount = cfg.account || '';
+        hasSavedPassword = Boolean(cfg.hasPassword);
+        updatePasswordPlaceholder();
+
+        const mode = cfg.activeMode || 'self';
+        const radio = document.querySelector('input[name="activeMode"][value="' + mode + '"]');
+        if (radio) radio.checked = true;
+        updateModeSelection(mode);
       }
       if (window.getDashboard) {
-        const dash = await window.getDashboard();
-        if (dash) window.onStatusUpdate(dash);
+        const d = await window.getDashboard();
+        window.onStatusUpdate(d);
       }
       if (window.getLogs) {
         const logs = await window.getLogs();
-        if (logs) {
-          logConsole.innerText = logs;
-          logConsole.scrollTop = logConsole.scrollHeight;
-        }
+        if (logs) logConsole.innerText = logs;
+        logConsole.scrollTop = logConsole.scrollHeight;
       }
-    } catch (e) {
-      console.error(e);
+      if (window.onUIRendered) {
+        await window.onUIRendered();
+      }
+    } catch(e) {
+      console.error('UI init error:', e);
     }
-  }
-  window.refreshAll = refreshAll;
-
-  // Init data
-  window.addEventListener('DOMContentLoaded', async () => {
-    if (pendingTab) switchTab(pendingTab);
-    await refreshAll();
-    if (window.onUIRendered) {
-      window.onUIRendered();
-    }
-  });
+  })();
 </script>
 </body>
-</html>
-`
+</html>`

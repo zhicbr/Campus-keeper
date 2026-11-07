@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -22,6 +24,27 @@ const (
 	OperatorUnicom  Operator = "unicom"
 	OperatorCampus  Operator = "campus"
 )
+
+type ActiveMode string
+
+const (
+	ModeSelf   ActiveMode = "self"
+	ModeFriend ActiveMode = "friend"
+)
+
+type FriendShareItem struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ShareCode string `json:"share_code"`
+	Operator  string `json:"operator,omitempty"`
+}
+
+type PublishedShareItem struct {
+	ShareID   string `json:"share_id"`
+	Memo      string `json:"memo"`
+	CreatedAt int64  `json:"created_at"`
+	ExpiresAt int64  `json:"expires_at"`
+}
 
 func (op Operator) DisplayName() string {
 	switch op {
@@ -54,24 +77,45 @@ func (op Operator) Suffix() string {
 }
 
 type Config struct {
-	Account        string        `json:"account"`
-	Password       string        `json:"password"`
-	Operator       Operator      `json:"operator"`
-	PortalURL      string        `json:"portal_url,omitempty"`
-	CampusMode     campus.Campus `json:"campus_mode,omitempty"`
-	AccountSuffix  string        `json:"account_suffix,omitempty"`
-	SuffixExplicit bool          `json:"suffix_explicit,omitempty"`
+	ActiveMode      ActiveMode           `json:"active_mode,omitempty"`
+	Account         string               `json:"account"`
+	Password        string               `json:"password"`
+	Operator        Operator             `json:"operator"`
+	PortalURL       string               `json:"portal_url,omitempty"`
+	CampusMode      campus.Campus        `json:"campus_mode,omitempty"`
+	AccountSuffix   string               `json:"account_suffix,omitempty"`
+	SuffixExplicit  bool                 `json:"suffix_explicit,omitempty"`
+	OwnerAdminToken string               `json:"owner_admin_token,omitempty"`
+	CloudHubURL     string               `json:"cloud_hub_url,omitempty"`
+	FriendShareCode string               `json:"friend_share_code,omitempty"`
+	FriendShares    []FriendShareItem    `json:"friend_shares,omitempty"`
+	PublishedShares []PublishedShareItem `json:"published_shares,omitempty"`
 }
 
 type storedConfig struct {
-	Account   string   `json:"account"`
-	Password  string   `json:"password"`
-	Operator  Operator `json:"operator"`
-	PortalURL string   `json:"portal_url,omitempty"`
+	ActiveMode      ActiveMode           `json:"active_mode,omitempty"`
+	Account         string               `json:"account"`
+	Password        string               `json:"password"`
+	Operator        Operator             `json:"operator"`
+	PortalURL       string               `json:"portal_url,omitempty"`
+	OwnerAdminToken string               `json:"owner_admin_token,omitempty"`
+	CloudHubURL     string               `json:"cloud_hub_url,omitempty"`
+	FriendShareCode string               `json:"friend_share_code,omitempty"`
+	FriendShares    []FriendShareItem    `json:"friend_shares,omitempty"`
+	PublishedShares []PublishedShareItem `json:"published_shares,omitempty"`
 }
 
 func (c Config) Valid() bool {
+	if c.ActiveMode == ModeFriend {
+		return strings.TrimSpace(c.FriendShareCode) != ""
+	}
 	return strings.TrimSpace(c.Account) != "" && strings.TrimSpace(c.Password) != ""
+}
+
+func generateAdminToken() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (c Config) OperatorName() string {
@@ -152,11 +196,29 @@ func atomicWriteFile(filename string, data []byte) error {
 }
 
 func SaveEncryptedConfig(cfg Config) error {
+	mode := cfg.ActiveMode
+	if mode == "" {
+		mode = ModeSelf
+	}
+	hubURL := cfg.CloudHubURL
+	if hubURL == "" {
+		hubURL = "https://keeper.egami.online"
+	}
+	adminToken := cfg.OwnerAdminToken
+	if adminToken == "" {
+		adminToken = generateAdminToken()
+	}
 	s := storedConfig{
-		Account:   strings.TrimSpace(cfg.Account),
-		Password:  cfg.Password,
-		Operator:  cfg.Operator,
-		PortalURL: cfg.PortalURL,
+		ActiveMode:      mode,
+		Account:         strings.TrimSpace(cfg.Account),
+		Password:        cfg.Password,
+		Operator:        cfg.Operator,
+		PortalURL:       cfg.PortalURL,
+		OwnerAdminToken: adminToken,
+		CloudHubURL:     hubURL,
+		FriendShareCode: strings.TrimSpace(cfg.FriendShareCode),
+		FriendShares:    cfg.FriendShares,
+		PublishedShares: cfg.PublishedShares,
 	}
 	if s.Operator == "" {
 		s.Operator = OperatorCMCC
@@ -185,18 +247,36 @@ func LoadEncryptedConfig() (Config, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return Config{}, err
 	}
-	if s.Account == "" || s.Password == "" {
+	mode := s.ActiveMode
+	if mode == "" {
+		mode = ModeSelf
+	}
+	if mode == ModeSelf && (s.Account == "" || s.Password == "") {
 		return Config{}, errors.New("账号或密码为空")
 	}
 	op := s.Operator
 	if op == "" {
 		op = OperatorCMCC
 	}
+	hubURL := s.CloudHubURL
+	if hubURL == "" {
+		hubURL = "https://keeper.egami.online"
+	}
+	adminToken := s.OwnerAdminToken
+	if adminToken == "" {
+		adminToken = generateAdminToken()
+	}
 	return Config{
-		Account:    s.Account,
-		Password:   s.Password,
-		Operator:   op,
-		PortalURL:  s.PortalURL,
-		CampusMode: campus.Auto,
+		ActiveMode:      mode,
+		Account:         s.Account,
+		Password:        s.Password,
+		Operator:        op,
+		PortalURL:       s.PortalURL,
+		CampusMode:      campus.Auto,
+		OwnerAdminToken: adminToken,
+		CloudHubURL:     hubURL,
+		FriendShareCode: s.FriendShareCode,
+		FriendShares:    s.FriendShares,
+		PublishedShares: s.PublishedShares,
 	}, nil
 }

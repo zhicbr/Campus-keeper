@@ -17,10 +17,12 @@ import (
 	"time"
 
 	"wenchang-campus-keeper/internal/campus"
+	"wenchang-campus-keeper/internal/cloud"
 	"wenchang-campus-keeper/internal/config"
 	"wenchang-campus-keeper/internal/diagnostics"
 	"wenchang-campus-keeper/internal/network"
 	"wenchang-campus-keeper/internal/portal"
+	"wenchang-campus-keeper/internal/sharing"
 	"wenchang-campus-keeper/internal/ui"
 )
 
@@ -126,7 +128,13 @@ func main() {
 				defer c.mu.Unlock()
 				return c.cfg
 			},
-			SaveConfig: c.updateConfig,
+			SaveConfig:        c.updateConfig,
+			SwitchMode:        c.switchMode,
+			PublishShare:      c.publishShare,
+			RevokeShare:       c.revokeShare,
+			ListMyShares:      c.listMyShares,
+			SaveFriendShare:   c.saveFriendShare,
+			DeleteFriendShare: c.deleteFriendShare,
 		},
 		*console,
 	)
@@ -427,6 +435,14 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	if diag := c.portal.Diagnostic(); diag != nil {
 		diag.Trigger("before-login")
 	}
+	loginCfg, err := c.prepareLoginConfig(ctx)
+	if err != nil {
+		c.scheduleRetry("获取认证凭据失败：" + err.Error())
+		c.setState("retry-wait", "认证失败："+err.Error())
+		return err
+	}
+	c.portal.SetConfig(loginCfg)
+
 	c.logger.Printf("尝试%s认证：%s", campus.CampusName(site), portal.SafePortal(portalURL))
 	if err := c.portal.Login(ctx, site, portalURL, c.link.IPv4, c.link.MAC); err != nil {
 		if cancelled := ctx.Err(); cancelled != nil {
@@ -584,6 +600,205 @@ func (c *controller) updateConfig(account, password, opStr string) (bool, error)
 	default:
 	}
 	return true, nil
+}
+
+func (c *controller) prepareLoginConfig(ctx context.Context) (config.Config, error) {
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
+
+	if cfg.ActiveMode != config.ModeFriend {
+		return cfg, nil
+	}
+
+	code := strings.TrimSpace(cfg.FriendShareCode)
+	if code == "" {
+		return cfg, errors.New("借用模式下未配置好友分享码")
+	}
+
+	shareID, key, err := sharing.ParseShareCode(code)
+	if err != nil {
+		return cfg, fmt.Errorf("解析好友分享码失败: %w", err)
+	}
+
+	cloudClient := cloud.NewClient(cfg.CloudHubURL)
+	c.logger.Printf("正在从云端拉取好友分享凭据: shareID=%s", shareID)
+	resp, err := cloudClient.FetchShare(ctx, shareID)
+	if err != nil {
+		return cfg, fmt.Errorf("拉取好友分享凭据失败: %w", err)
+	}
+
+	creds, err := sharing.DecryptCredentials(resp.EncryptedPayload, key)
+	if err != nil {
+		return cfg, fmt.Errorf("解密好友分享凭据失败: %w", err)
+	}
+
+	c.logger.Printf("已成功获取好友分享凭据 (备注: %s, 运营商: %s)", creds.Memo, creds.Operator)
+	loginCfg := cfg
+	loginCfg.Account = creds.Account
+	loginCfg.Password = creds.Password
+	loginCfg.Operator = config.Operator(creds.Operator)
+	return loginCfg, nil
+}
+
+func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if mode == config.ModeFriend {
+		if strings.TrimSpace(friendShareCode) == "" {
+			return errors.New("请输入好友分享码")
+		}
+		if _, _, err := sharing.ParseShareCode(friendShareCode); err != nil {
+			return err
+		}
+		c.cfg.FriendShareCode = strings.TrimSpace(friendShareCode)
+	}
+	c.cfg.ActiveMode = mode
+
+	if err := config.SaveEncryptedConfig(c.cfg); err != nil {
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+
+	c.logger.Printf("运行模式已切换为：%s", mode)
+	c.syncUI()
+	select {
+	case c.reconnectTrigger <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (c *controller) publishShare(memo string, durationHours int) (string, error) {
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
+
+	if strings.TrimSpace(cfg.Account) == "" || strings.TrimSpace(cfg.Password) == "" {
+		return "", errors.New("请先在「我的账号」中配置本人的校园网账号与密码，再生成分享")
+	}
+
+	key, err := sharing.GenerateRandomKey()
+	if err != nil {
+		return "", err
+	}
+	shareID, err := sharing.GenerateShareID()
+	if err != nil {
+		return "", err
+	}
+
+	creds := sharing.SharedCredentials{
+		Account:  cfg.Account,
+		Password: cfg.Password,
+		Operator: string(cfg.Operator),
+		Memo:     memo,
+	}
+
+	encryptedPayload, err := sharing.EncryptCredentials(creds, key)
+	if err != nil {
+		return "", fmt.Errorf("加密凭据失败: %w", err)
+	}
+
+	cloudClient := cloud.NewClient(cfg.CloudHubURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pubResp, err := cloudClient.PublishShare(ctx, cfg.OwnerAdminToken, cloud.PublishRequest{
+		ShareID:          shareID,
+		EncryptedPayload: encryptedPayload,
+		Operator:         string(cfg.Operator),
+		Memo:             memo,
+		DurationHours:    durationHours,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	shareCode := sharing.FormatShareCode(shareID, key)
+
+	c.mu.Lock()
+	c.cfg.PublishedShares = append(c.cfg.PublishedShares, config.PublishedShareItem{
+		ShareID:   shareID,
+		Memo:      memo,
+		CreatedAt: time.Now().UnixMilli(),
+		ExpiresAt: pubResp.ExpiresAt,
+	})
+	_ = config.SaveEncryptedConfig(c.cfg)
+	c.mu.Unlock()
+
+	c.logger.Printf("已生成新好友分享码: shareID=%s, 备注=%s, 有效期=%d小时", shareID, memo, durationHours)
+	return shareCode, nil
+}
+
+func (c *controller) revokeShare(shareID string) error {
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
+
+	cloudClient := cloud.NewClient(cfg.CloudHubURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := cloudClient.RevokeShare(ctx, cfg.OwnerAdminToken, shareID); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	var remaining []config.PublishedShareItem
+	for _, s := range c.cfg.PublishedShares {
+		if s.ShareID != shareID {
+			remaining = append(remaining, s)
+		}
+	}
+	c.cfg.PublishedShares = remaining
+	_ = config.SaveEncryptedConfig(c.cfg)
+	c.mu.Unlock()
+
+	c.logger.Printf("已从云端吊销分享: shareID=%s", shareID)
+	return nil
+}
+
+func (c *controller) listMyShares() ([]cloud.ShareSummary, error) {
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
+
+	cloudClient := cloud.NewClient(cfg.CloudHubURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return cloudClient.ListMyShares(ctx, cfg.OwnerAdminToken)
+}
+
+func (c *controller) saveFriendShare(name, shareCode string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	shareID, _, err := sharing.ParseShareCode(shareCode)
+	if err != nil {
+		return err
+	}
+
+	c.cfg.FriendShares = append(c.cfg.FriendShares, config.FriendShareItem{
+		ID:        shareID,
+		Name:      name,
+		ShareCode: shareCode,
+	})
+	return config.SaveEncryptedConfig(c.cfg)
+}
+
+func (c *controller) deleteFriendShare(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var filtered []config.FriendShareItem
+	for _, item := range c.cfg.FriendShares {
+		if item.ID != id {
+			filtered = append(filtered, item)
+		}
+	}
+	c.cfg.FriendShares = filtered
+	return config.SaveEncryptedConfig(c.cfg)
 }
 
 func (c *controller) syncUI() {
