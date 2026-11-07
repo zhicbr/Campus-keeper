@@ -227,6 +227,11 @@ func (p *Client) PrepareAuthentication(ctx context.Context, initial ProbeResult)
 		portal = redirect
 	}
 	if portal == "" {
+		if direct := p.probeDirectPortal(ctx); direct != "" {
+			portal = trusted(direct)
+		}
+	}
+	if portal == "" {
 		if diag != nil {
 			diag.Log.Print("authentication gate: no current trusted redirect; LOGIN SUPPRESSED")
 		}
@@ -263,6 +268,41 @@ func (p *Client) discover(ctx context.Context) (string, error) {
 		}
 	}
 	return "", errors.New("未收到校园网认证跳转")
+}
+
+// probeDirectPortal checks whether the campus portal host directly returns a valid portal login page.
+// This is critical when external DNS is blocked prior to authentication, making public redirect targets unreachable.
+func (p *Client) probeDirectPortal(ctx context.Context) string {
+	directURL := "http://" + campus.AuthHost + campus.PathFrontPage
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, directURL, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := p.doDiagnostic(req, "direct_portal")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if loc, locErr := resp.Location(); locErr == nil {
+			return req.URL.ResolveReference(loc).String()
+		}
+		if rawLoc := resp.Header.Get("Location"); rawLoc != "" {
+			return rawLoc
+		}
+		return directURL
+	}
+	if resp.StatusCode == http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+		if match := portalRedirectPattern.FindSubmatch(body); match != nil {
+			return string(match[1])
+		}
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "Dr.COM") || strings.Contains(bodyStr, "a79.htm") || strings.Contains(bodyStr, "eportal") || strings.Contains(bodyStr, "校园网") {
+			return directURL
+		}
+	}
+	return ""
 }
 
 func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {

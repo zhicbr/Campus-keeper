@@ -22,9 +22,11 @@ type DaemonPolicy struct {
 	PostAuthVerifyInterval time.Duration // Interval between verification probes (default: 3s)
 
 	// Wi-Fi roaming and gateway health
-	DeadGatewayThreshold int           // Consecutive missing ARP count before triggering AP roam (default: 2)
+	DeadGatewayThreshold int           // Consecutive missing ARP count before triggering AP roam (default: 6)
 	WiFiResetCooldown    time.Duration // Cooldown between automatic Wi-Fi reset triggers (default: 60s)
 	WiFiInitialDelay     time.Duration // Initial retry delay for Wi-Fi reconnection (default: 10s)
+	HandshakeGracePeriod time.Duration // Grace period after link change before checking dead gateway (default: 60s)
+	MaxConsecutiveRoams  int           // Maximum consecutive AP roams before circuit breaker trips (default: 2)
 
 	// Retry & Backoff
 	RetryBase       time.Duration // Initial retry base for authentication failure (default: 5s)
@@ -46,9 +48,11 @@ var defaultPolicy = DaemonPolicy{
 	PostAuthVerifyAttempts: 5,
 	PostAuthVerifyInterval: 3 * time.Second,
 
-	DeadGatewayThreshold: 2,
+	DeadGatewayThreshold: 6,
 	WiFiResetCooldown:    60 * time.Second,
 	WiFiInitialDelay:     10 * time.Second,
+	HandshakeGracePeriod: 60 * time.Second,
+	MaxConsecutiveRoams:  2,
 
 	RetryBase:       5 * time.Second,
 	RetryMax:        5 * time.Minute,
@@ -139,6 +143,24 @@ func WithWiFiPolicy(deadThreshold int, cooldown, initialDelay time.Duration) Opt
 	}
 }
 
+// WithHandshakeGracePeriod sets the grace period after connecting before evaluating gateway health.
+func WithHandshakeGracePeriod(d time.Duration) Option {
+	return func(p *DaemonPolicy) {
+		if d > 0 {
+			p.HandshakeGracePeriod = d
+		}
+	}
+}
+
+// WithMaxConsecutiveRoams sets the circuit breaker limit for consecutive AP roams.
+func WithMaxConsecutiveRoams(n int) Option {
+	return func(p *DaemonPolicy) {
+		if n > 0 {
+			p.MaxConsecutiveRoams = n
+		}
+	}
+}
+
 func (c *controller) getPolicy() DaemonPolicy {
 	if c.policy.HealthInterval <= 0 {
 		return defaultPolicy
@@ -163,6 +185,7 @@ func newController(cfg config.Config, p *portal.Client, logger *log.Logger, quie
 		wifiTimer:        time.NewTimer(time.Hour),
 		reconnectTrigger: make(chan struct{}, 1),
 		linkRecheck:      make(chan struct{}, 1),
+		linkConnectedAt:  time.Now(),
 	}
 	stopTimer(c.retryTimer)
 	stopTimer(c.wifiTimer)

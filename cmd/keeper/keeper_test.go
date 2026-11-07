@@ -69,6 +69,8 @@ func TestOptionNonPositiveValidation(t *testing.T) {
 		WithHealthInterval(0),
 		WithLinkInterval(-5*time.Second),
 		WithDailyReset(99, 99),
+		WithHandshakeGracePeriod(-10*time.Second),
+		WithMaxConsecutiveRoams(0),
 	)
 	p := c.getPolicy()
 	if p.HealthInterval != defaultPolicy.HealthInterval {
@@ -79,6 +81,12 @@ func TestOptionNonPositiveValidation(t *testing.T) {
 	}
 	if p.DailyResetHour != defaultPolicy.DailyResetHour || p.DailyResetMinute != defaultPolicy.DailyResetMinute {
 		t.Fatalf("out-of-range daily reset should not override default, got %d:%d", p.DailyResetHour, p.DailyResetMinute)
+	}
+	if p.HandshakeGracePeriod != defaultPolicy.HandshakeGracePeriod {
+		t.Fatalf("negative HandshakeGracePeriod should not override default, got %v", p.HandshakeGracePeriod)
+	}
+	if p.MaxConsecutiveRoams != defaultPolicy.MaxConsecutiveRoams {
+		t.Fatalf("zero MaxConsecutiveRoams should not override default, got %d", p.MaxConsecutiveRoams)
 	}
 }
 

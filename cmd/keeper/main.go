@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -48,6 +49,8 @@ type controller struct {
 	nextReset        time.Time
 	lastStatusLog    time.Time
 	deadGatewayCount int
+	consecutiveRoams int       // 连续触发 AP 漫游次数（熔断保护）
+	linkConnectedAt  time.Time // 当前网络接口建立/切换时间戳
 	lastWiFiReset    time.Time
 	reconnectTrigger chan struct{}
 	linkRecheck      chan struct{}
@@ -220,6 +223,17 @@ func (c *controller) run(ctx context.Context) error {
 	}
 }
 
+func triggerGatewayARP(gatewayIP string) {
+	if gatewayIP == "" {
+		return
+	}
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(gatewayIP, "53"), 50*time.Millisecond)
+	if err == nil {
+		_, _ = conn.Write([]byte{0})
+		_ = conn.Close()
+	}
+}
+
 func (c *controller) cycle(ctx context.Context, reason string) error {
 	p := c.getPolicy()
 	if err := ctx.Err(); err != nil {
@@ -314,24 +328,39 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return errors.New("未配置登录账号或密码")
 	}
 	if c.link.Kind == "wifi" && result.Redirect == "" {
-		_, gwMac, gwErr := campus.GatewayFingerprint(c.link.Index)
-		if gwErr != nil || gwMac == "" {
-			c.deadGatewayCount++
-			if c.deadGatewayCount >= p.DeadGatewayThreshold && time.Since(c.lastWiFiReset) >= p.WiFiResetCooldown {
-				c.logger.Printf("检测到 Wi-Fi 网关无响应（连续 %d 次无 ARP 邻居），执行断开重连以漫游至健康 AP", c.deadGatewayCount)
-				c.deadGatewayCount = 0
-				c.lastWiFiReset = time.Now()
-				c.setState("wifi-connecting", "Wi-Fi 网关失效，正在重新连接")
-				if err := network.ReconnectSavedWiFi(network.StudentWiFiProfile, c.portal.Diagnostic()); err != nil {
-					c.logger.Printf("Wi-Fi 重连失败：%v", err)
-				}
-				return errors.New("Wi-Fi 网关失效，已触发重连")
-			}
-		} else {
+		if p.HandshakeGracePeriod > 0 && time.Since(c.linkConnectedAt) < p.HandshakeGracePeriod {
+			// 连接初期握手冷静期（默认 60s），等待 DHCP、802.11 关联及 ARP 学习稳定，绝不提前掐网
 			c.deadGatewayCount = 0
+		} else {
+			gwIP, gwMac, gwErr := campus.GatewayFingerprint(c.link.Index)
+			if gwErr != nil || gwMac == "" {
+				if gwIP != "" {
+					triggerGatewayARP(gwIP)
+				}
+				c.deadGatewayCount++
+				if c.deadGatewayCount >= p.DeadGatewayThreshold && time.Since(c.lastWiFiReset) >= p.WiFiResetCooldown {
+					if c.consecutiveRoams >= p.MaxConsecutiveRoams {
+						c.logger.Printf("检测到 Wi-Fi 网关无响应（连续 %d 次无 ARP 邻居），但已达到最大漫游次数（%d 次），触发熔断暂停重连以防网络震荡", c.deadGatewayCount, p.MaxConsecutiveRoams)
+					} else {
+						c.deadGatewayCount = 0
+						c.consecutiveRoams++
+						c.lastWiFiReset = time.Now()
+						c.logger.Printf("检测到 Wi-Fi 网关无响应（连续 %d 次无 ARP 邻居），执行断开重连以漫游至健康 AP（第 %d/%d 次）", p.DeadGatewayThreshold, c.consecutiveRoams, p.MaxConsecutiveRoams)
+						c.setState("wifi-connecting", "Wi-Fi 网关失效，正在重新连接")
+						if err := network.ReconnectSavedWiFi(network.StudentWiFiProfile, c.portal.Diagnostic()); err != nil {
+							c.logger.Printf("Wi-Fi 重连失败：%v", err)
+						}
+						return errors.New("Wi-Fi 网关失效，已触发重连")
+					}
+				}
+			} else {
+				c.deadGatewayCount = 0
+				c.consecutiveRoams = 0
+			}
 		}
 	} else {
 		c.deadGatewayCount = 0
+		c.consecutiveRoams = 0
 	}
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		if reason == "手动重连" {
@@ -362,6 +391,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	if decision.Online {
 		c.deadGatewayCount = 0
+		c.consecutiveRoams = 0
 		c.setState("online", "已恢复，取消登录")
 		c.resetRetry()
 		c.resetWiFiRetry()
@@ -422,6 +452,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		}
 		if verified.Online {
 			c.deadGatewayCount = 0
+			c.consecutiveRoams = 0
 			c.setState("online", "已连通")
 			c.resetRetry()
 			c.resetWiFiRetry()
@@ -480,7 +511,7 @@ func (c *controller) adoptLink(next network.LinkState) bool {
 	if next == c.link {
 		return false
 	}
-	if !next.SameNetwork(c.link) {
+	if !next.SameNetwork(c.link) || (!c.link.Ready() && next.Ready()) {
 		// An online result from the previous network is no longer valid.
 		c.state = "checking"
 		hadContext := c.campus != "" || c.lastPortal != "" || !c.nextRetry.IsZero()
@@ -488,6 +519,9 @@ func (c *controller) adoptLink(next network.LinkState) bool {
 		c.campus = ""
 		c.resetRetry()
 		c.resetWiFiRetry()
+		c.deadGatewayCount = 0
+		c.consecutiveRoams = 0
+		c.linkConnectedAt = time.Now()
 		if hadContext && c.logger != nil {
 			c.logger.Print("网络已切换；清除认证及重试缓存")
 		}

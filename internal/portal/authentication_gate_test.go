@@ -116,3 +116,53 @@ func TestAuthenticationGateCancellationDuringDiscovery(t *testing.T) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
+
+func TestProbeDirectPortal(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		location   string
+		body       string
+		wantURL    string
+	}{
+		{
+			name:       "302 redirect with Location parameter",
+			statusCode: 302,
+			location:   "http://10.2.5.251/a79.htm?wlanuserip=10.3.97.58",
+			wantURL:    "http://10.2.5.251/a79.htm?wlanuserip=10.3.97.58",
+		},
+		{
+			name:       "200 OK with Dr.COM body",
+			statusCode: 200,
+			body:       "<html><head><title>Dr.COM</title></head><body>login</body></html>",
+			wantURL:    "http://10.2.5.251/a79.htm",
+		},
+		{
+			name:       "200 OK unrelated page",
+			statusCode: 200,
+			body:       "<html><body>hello world</body></html>",
+			wantURL:    "",
+		},
+		{
+			name:       "500 Internal Server Error",
+			statusCode: 500,
+			wantURL:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewClient(config.Config{})
+			p.SetHTTPClient(&http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return gateResponse(tt.statusCode, tt.body, tt.location), nil
+				}),
+				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			})
+			got := p.probeDirectPortal(context.Background())
+			if got != tt.wantURL {
+				t.Errorf("probeDirectPortal() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}

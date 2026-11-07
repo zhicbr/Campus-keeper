@@ -428,7 +428,8 @@ const appHTML = `<!DOCTYPE html>
       </div>
 
       <div class="footer-actions">
-        <div class="action-buttons">
+        <div class="action-buttons" style="display: flex; gap: 8px; width: 100%;">
+          <button id="btnExit" class="fluent-btn fluent-btn-secondary" style="margin-right: auto; color: #d13438;">退出程序</button>
           <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">重新连接</button>
           <button id="btnSave" class="fluent-btn fluent-btn-primary">保存配置</button>
         </div>
@@ -597,6 +598,12 @@ const appHTML = `<!DOCTYPE html>
   });
 
   // Reconnect
+  document.getElementById('btnExit').addEventListener('click', async () => {
+    if (confirm('确定要彻底退出校园网守护程序吗？退出后将停止自动保活。')) {
+      if (window.exitApp) window.exitApp();
+    }
+  });
+
   document.getElementById('btnReconnect').addEventListener('click', async () => {
     try {
       if (window.reconnect) {

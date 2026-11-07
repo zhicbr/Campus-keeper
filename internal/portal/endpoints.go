@@ -19,6 +19,7 @@ const ProbeURL = PrimaryProbeURL
 
 // RedirectDiscoveryTargets are plain-HTTP endpoints queried to capture campus 302/meta redirects.
 var RedirectDiscoveryTargets = []string{
+	"http://1.1.1.1/",
 	"http://9.9.9.9/",
 	"http://neverssl.com/",
 }

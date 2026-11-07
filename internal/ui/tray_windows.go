@@ -92,6 +92,7 @@ var (
 	loadImage             = user32.NewProc("LoadImageW")
 	getSystemMetrics      = user32.NewProc("GetSystemMetrics")
 	keybdEvent            = user32.NewProc("keybd_event")
+	registerWindowMessage = user32.NewProc("RegisterWindowMessageW")
 )
 
 type winPoint struct{ x, y int32 }
@@ -277,8 +278,13 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 
 	instance, _, _ := getModuleHandle.Call(0)
 	trayClassName, _ := syscall.UTF16PtrFromString("WenchangCampusKeeperTray")
+	taskbarCreatedMsg, _, _ := registerWindowMessage.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("TaskbarCreated"))))
 
 	trayCallback := syscall.NewCallback(func(hwnd, message, wparam, lparam uintptr) uintptr {
+		if taskbarCreatedMsg != 0 && uint32(message) == uint32(taskbarCreatedMsg) {
+			t.updateIcon(nimAdd)
+			return 0
+		}
 		switch uint32(message) {
 		case trayMessage:
 			switch uint16(lparam) {
@@ -292,6 +298,7 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 			t.updateIcon(nimModify)
 			return 0
 		case WakeMessage:
+			t.updateIcon(nimAdd) // Self-healing: if tray icon was destroyed, wake immediately recovers it
 			if t.cb.GetConfig != nil && !t.cb.GetConfig().Valid() {
 				t.openSettings()
 			} else {
@@ -496,6 +503,11 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 
 	wv.Bind("hideWindow", func() (bool, error) {
 		t.hideWindow()
+		return true, nil
+	})
+
+	wv.Bind("exitApp", func() (bool, error) {
+		t.exit()
 		return true, nil
 	})
 
@@ -784,35 +796,39 @@ func (t *TrayUI) popupMenu() {
 			fmt.Fprintf(t, "[UI] 设置开机自启动失败: %v\n", err)
 		}
 	case menuCmdExit:
-		t.mu.Lock()
-		hwnd := t.hwndTray
-		wv := t.wv
-		hwndWebview := t.hwndWebview
-		oldWndProc := t.oldWndProc
-		quit := t.cb.Quit
-		t.mu.Unlock()
-
-		diagnostics.SetConsoleWriter(io.Discard)
-		if hwnd != 0 {
-			var data notifyIconData
-			data.size = uint32(unsafe.Sizeof(data))
-			data.hwnd = hwnd
-			data.id = 1
-			shellNotifyIcon.Call(uintptr(nimDelete), uintptr(unsafe.Pointer(&data)))
-		}
-		if hwndWebview != 0 && oldWndProc != 0 {
-			setWndProc(hwndWebview, oldWndProc)
-		}
-		if wv != nil {
-			wv.Dispatch(func() {
-				wv.Destroy()
-			})
-		}
-		if quit != nil {
-			quit()
-		}
-		os.Exit(0)
+		t.exit()
 	}
+}
+
+func (t *TrayUI) exit() {
+	t.mu.Lock()
+	hwnd := t.hwndTray
+	wv := t.wv
+	hwndWebview := t.hwndWebview
+	oldWndProc := t.oldWndProc
+	quit := t.cb.Quit
+	t.mu.Unlock()
+
+	diagnostics.SetConsoleWriter(io.Discard)
+	if hwnd != 0 {
+		var data notifyIconData
+		data.size = uint32(unsafe.Sizeof(data))
+		data.hwnd = hwnd
+		data.id = 1
+		shellNotifyIcon.Call(uintptr(nimDelete), uintptr(unsafe.Pointer(&data)))
+	}
+	if hwndWebview != 0 && oldWndProc != 0 {
+		setWndProc(hwndWebview, oldWndProc)
+	}
+	if wv != nil {
+		wv.Dispatch(func() {
+			wv.Destroy()
+		})
+	}
+	if quit != nil {
+		quit()
+	}
+	os.Exit(0)
 }
 
 func (t *TrayUI) Write(p []byte) (int, error) {
