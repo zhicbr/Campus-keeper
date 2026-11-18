@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -70,6 +71,7 @@ var (
 	defWindowProc         = user32.NewProc("DefWindowProcW")
 	destroyWindow         = user32.NewProc("DestroyWindow")
 	showWindow            = user32.NewProc("ShowWindow")
+	showWindowAsync       = user32.NewProc("ShowWindowAsync")
 	createPopupMenu       = user32.NewProc("CreatePopupMenu")
 	appendMenu            = user32.NewProc("AppendMenuW")
 	trackPopupMenu        = user32.NewProc("TrackPopupMenu")
@@ -162,8 +164,6 @@ type TrayCallbacks struct {
 	PublishShare      func(memo string, durationHours int) (shareCode string, err error)
 	RevokeShare       func(shareID string) error
 	ListMyShares      func() ([]cloud.ShareSummary, error)
-	SaveFriendShare   func(name, shareCode string) error
-	DeleteFriendShare func(id string) error
 }
 
 type TrayUI struct {
@@ -385,6 +385,96 @@ func (t *TrayUI) trayLoop(ready chan<- error) {
 	close(t.done)
 }
 
+const asyncRPCBootstrapJS = `(function() {
+  if (window.__asyncRPC) return;
+  window.__asyncRPC = { seq: 1, pending: {} };
+  window.__asyncResolve = function(id, ok, val) {
+    var p = window.__asyncRPC.pending[id];
+    if (!p) return;
+    delete window.__asyncRPC.pending[id];
+    if (ok) p.resolve(val); else p.reject(val);
+  };
+})();`
+
+// bindAsync exposes fn to JS as an async Promise-returning function whose Go execution
+// runs in a background goroutine so it never blocks the WebView2 Win32 UI thread.
+func (t *TrayUI) bindAsync(wv webview2.WebView, name string, fn interface{}) {
+	fv := reflect.ValueOf(fn)
+	ft := fv.Type()
+	inTypes := make([]reflect.Type, ft.NumIn()+1)
+	inTypes[0] = reflect.TypeOf(0)
+	for i := 0; i < ft.NumIn(); i++ {
+		inTypes[i+1] = ft.In(i)
+	}
+	errType := reflect.TypeOf((*error)(nil)).Elem()
+	wrapperType := reflect.FuncOf(inTypes, []reflect.Type{errType}, false)
+
+	wrapper := reflect.MakeFunc(wrapperType, func(args []reflect.Value) []reflect.Value {
+		callID := int(args[0].Int())
+		fnArgs := make([]reflect.Value, len(args)-1)
+		copy(fnArgs, args[1:])
+
+		go func() {
+			res := fv.Call(fnArgs)
+			var val interface{}
+			var callErr error
+			switch len(res) {
+			case 1:
+				if res[0].Type().Implements(errType) {
+					if !res[0].IsNil() {
+						callErr = res[0].Interface().(error)
+					}
+				} else {
+					val = res[0].Interface()
+				}
+			case 2:
+				val = res[0].Interface()
+				if !res[1].IsNil() {
+					callErr = res[1].Interface().(error)
+				}
+			}
+
+			ok := callErr == nil
+			var payload []byte
+			if ok {
+				payload, _ = json.Marshal(val)
+			} else {
+				payload, _ = json.Marshal(callErr.Error())
+			}
+
+			t.mu.Lock()
+			curWV := t.wv
+			t.mu.Unlock()
+			if curWV != nil {
+				curWV.Dispatch(func() {
+					curWV.Eval(fmt.Sprintf("if (window.__asyncResolve) window.__asyncResolve(%d, %t, %s);", callID, ok, string(payload)))
+				})
+			}
+		}()
+
+		return []reflect.Value{reflect.Zero(errType)}
+	})
+
+	rawName := "__raw_" + name
+	_ = wv.Bind(rawName, wrapper.Interface())
+	jsName, _ := json.Marshal(name)
+	jsRawName, _ := json.Marshal(rawName)
+	wv.Init(fmt.Sprintf(`(function() {
+  var name = %s;
+  var rawName = %s;
+  window[name] = function() {
+    var id = window.__asyncRPC.seq++;
+    var args = Array.prototype.slice.call(arguments);
+    return new Promise(function(resolve, reject) {
+      window.__asyncRPC.pending[id] = { resolve: resolve, reject: reject };
+      window[rawName].apply(null, [id].concat(args)).catch(function(err) {
+        window.__asyncResolve(id, false, String(err));
+      });
+    });
+  };
+})();`, string(jsName), string(jsRawName)))
+}
+
 func (t *TrayUI) webviewLoop(ready chan struct{}) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -442,8 +532,9 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 	t.oldWndProc = oldWndProc
 	t.mu.Unlock()
 
-	// Bind Go RPC methods
-	wv.Bind("saveConfig", func(account, password, opStr string) (bool, error) {
+	// Bind Go RPC methods (async so WebView2 Win32 UI thread never blocks on I/O or locks)
+	wv.Init(asyncRPCBootstrapJS)
+	t.bindAsync(wv, "saveConfig", func(account, password, opStr string) (bool, error) {
 		if t.cb.SaveConfig == nil {
 			return false, errors.New("配置服务未就绪")
 		}
@@ -463,7 +554,7 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 
 	wv.Bind("openDataDir", func() (bool, error) {
 		dir := config.AppDataDir()
-		shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
+		go shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(dir))), 0, 0, 1)
 		return true, nil
 	})
 
@@ -472,10 +563,9 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 		Account         string                   `json:"account"`
 		HasPassword     bool                     `json:"hasPassword"`
 		Operator        string                   `json:"operator"`
-		FriendShareCode string                   `json:"friendShareCode"`
-		FriendShares    []config.FriendShareItem `json:"friendShares"`
+		FriendShareCode string `json:"friendShareCode"`
 	}
-	wv.Bind("getConfig", func() (jsConfig, error) {
+	t.bindAsync(wv, "getConfig", func() (jsConfig, error) {
 		var res jsConfig
 		if t.cb.GetConfig == nil {
 			return res, errors.New("配置服务未就绪")
@@ -489,7 +579,6 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 		res.HasPassword = strings.TrimSpace(cfg.Password) != ""
 		res.Operator = cfg.OperatorName()
 		res.FriendShareCode = cfg.FriendShareCode
-		res.FriendShares = cfg.FriendShares
 		return res, nil
 	})
 
@@ -501,7 +590,7 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 		IsCampus   bool   `json:"isCampus"`
 		ActiveMode string `json:"activeMode"`
 	}
-	wv.Bind("getDashboard", func() (jsDashboard, error) {
+	t.bindAsync(wv, "getDashboard", func() (jsDashboard, error) {
 		t.mu.Lock()
 		dash := t.dash
 		t.mu.Unlock()
@@ -520,7 +609,7 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 		}, nil
 	})
 
-	wv.Bind("switchMode", func(mode string, friendShareCode string) (bool, error) {
+	t.bindAsync(wv, "switchMode", func(mode string, friendShareCode string) (bool, error) {
 		if t.cb.SwitchMode == nil {
 			return false, errors.New("模式切换服务未就绪")
 		}
@@ -531,14 +620,14 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 		return true, nil
 	})
 
-	wv.Bind("publishShare", func(memo string, durationHours int) (string, error) {
+	t.bindAsync(wv, "publishShare", func(memo string, durationHours int) (string, error) {
 		if t.cb.PublishShare == nil {
 			return "", errors.New("分享服务未就绪")
 		}
 		return t.cb.PublishShare(memo, durationHours)
 	})
 
-	wv.Bind("revokeShare", func(shareID string) (bool, error) {
+	t.bindAsync(wv, "revokeShare", func(shareID string) (bool, error) {
 		if t.cb.RevokeShare == nil {
 			return false, errors.New("吊销服务未就绪")
 		}
@@ -549,36 +638,15 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 		return true, nil
 	})
 
-	wv.Bind("listMyShares", func() ([]cloud.ShareSummary, error) {
+	t.bindAsync(wv, "listMyShares", func() ([]cloud.ShareSummary, error) {
 		if t.cb.ListMyShares == nil {
 			return nil, errors.New("列表服务未就绪")
 		}
 		return t.cb.ListMyShares()
 	})
 
-	wv.Bind("saveFriendShare", func(name, shareCode string) (bool, error) {
-		if t.cb.SaveFriendShare == nil {
-			return false, errors.New("保存服务未就绪")
-		}
-		err := t.cb.SaveFriendShare(name, shareCode)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
-	})
 
-	wv.Bind("deleteFriendShare", func(id string) (bool, error) {
-		if t.cb.DeleteFriendShare == nil {
-			return false, errors.New("删除服务未就绪")
-		}
-		err := t.cb.DeleteFriendShare(id)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
-	})
-
-	wv.Bind("getLogs", func() (string, error) {
+	t.bindAsync(wv, "getLogs", func() (string, error) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		return t.logText, nil
@@ -665,7 +733,7 @@ func (t *TrayUI) hideWindow() {
 	t.windowVisible = false
 	t.mu.Unlock()
 	if hwnd != 0 {
-		showWindow.Call(hwnd, 0) // SW_HIDE
+		showWindowAsync.Call(hwnd, 0) // SW_HIDE
 	}
 }
 

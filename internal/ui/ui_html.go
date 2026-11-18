@@ -401,10 +401,9 @@ const appHTML = `<!DOCTYPE html>
   <!-- Top Navigation & Status -->
   <div class="top-nav-bar">
     <div class="segmented-nav">
-      <button class="nav-item active" data-tab="dashboard">控制面板</button>
-      <button class="nav-item" data-tab="account">我的账号</button>
-      <button class="nav-item" data-tab="sharing">好友共享</button>
-      <button class="nav-item" data-tab="logs">系统日志</button>
+      <button class="nav-item active" data-tab="settings">账号配置</button>
+      <button class="nav-item" data-tab="sharing">共享设置</button>
+      <button class="nav-item" data-tab="logs">运行日志</button>
     </div>
     <div id="statusBadge" class="status-indicator">
       <span class="status-dot"></span>
@@ -412,69 +411,18 @@ const appHTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- VIEW 1: Dashboard & Mode Selection -->
-  <div id="view-dashboard" class="view-panel active">
+  <!-- VIEW 1: Account Settings (Main Tab) -->
+  <div id="view-settings" class="view-panel active">
     <div class="settings-container">
       <div class="fluent-card">
-        <div class="card-header">
-          <span>网络连接与登录模式</span>
-          <span id="activeModeBadge" style="color: var(--accent); font-weight: 500;">自身账号</span>
-        </div>
-        <div class="mode-radio-group">
-          <label class="mode-option selected" id="optSelf">
-            <input type="radio" name="activeMode" value="self" checked style="margin-top: 3px;" />
-            <div>
-              <div style="font-weight: 600;">使用我的账号（本地直连）</div>
-              <div class="mode-desc">直接读取本地加密保存的校园网账号，秒级离线认证，不受云端限制。</div>
-            </div>
-          </label>
-          <label class="mode-option" id="optFriend">
-            <input type="radio" name="activeMode" value="friend" style="margin-top: 3px;" />
-            <div>
-              <div style="font-weight: 600;">借用好友账号（Cloudflare 云端鉴权）</div>
-              <div class="mode-desc">使用好友生成的专属分享码，通过 Cloudflare 安全拉取密文登录，所有者可随时吊销。</div>
-            </div>
-          </label>
-        </div>
-
-        <!-- Friend Share Code input row (only visible in Friend mode) -->
-        <div id="friendInputSection" style="display: none; padding: 10px 16px; background: #fafafa; border-top: 1px solid #f0f0f0;">
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="text" id="friendShareCode" class="fluent-input" style="flex: 1;" placeholder="粘贴好友分享码 (CK1.sh_xxxx...)" autocomplete="off" />
-            <button id="btnApplyFriendMode" class="fluent-btn fluent-btn-primary" style="height: 30px;">应用借用</button>
-          </div>
-          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">* 凭据仅在内存中临时解密发包，绝不会在本地明文留存</div>
-        </div>
-
-        <div class="info-bar">
-          <span>当前网络链路</span>
-          <span id="linkInfo" class="info-val">检测中...</span>
-        </div>
-      </div>
-
-      <div class="footer-actions">
-        <button id="btnExit" class="fluent-btn fluent-btn-danger" style="margin-right: auto;">退出程序</button>
-        <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">立即重新连接</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- VIEW 2: My Account -->
-  <div id="view-account" class="view-panel">
-    <div class="settings-container">
-      <div class="fluent-card">
-        <div class="card-header">
-          <span>我的校园网凭据配置</span>
-          <span style="font-size: 11px; color: var(--text-muted);">Windows DPAPI 本地硬件加密</span>
-        </div>
         <div class="setting-row">
-          <label class="setting-label" for="account">学号 / 工号</label>
+          <label class="setting-label" for="account">账号</label>
           <div class="control-wrapper">
             <input type="text" id="account" class="fluent-input" placeholder="学号 / 工号" autocomplete="off" spellcheck="false" />
           </div>
         </div>
         <div class="setting-row">
-          <label class="setting-label" for="password">校园网密码</label>
+          <label class="setting-label" for="password">密码</label>
           <div class="control-wrapper">
             <input type="password" id="password" class="fluent-input" placeholder="校园网密码" autocomplete="off" />
           </div>
@@ -491,59 +439,86 @@ const appHTML = `<!DOCTYPE html>
             </select>
           </div>
         </div>
+        <div class="info-bar">
+          <span>当前网络链路</span>
+          <span id="linkInfo" class="info-val">检测中...</span>
+        </div>
       </div>
 
       <div class="footer-actions">
-        <button id="btnSaveAccount" class="fluent-btn fluent-btn-primary">保存账号配置</button>
+        <button id="btnExit" class="fluent-btn fluent-btn-danger" style="margin-right: auto;">退出程序</button>
+        <button id="btnReconnect" class="fluent-btn fluent-btn-secondary">重新连接</button>
+        <button id="btnSaveAccount" class="fluent-btn fluent-btn-primary">保存配置</button>
       </div>
     </div>
   </div>
 
-  <!-- VIEW 3: Sharing Hub -->
+  <!-- VIEW 2: Sharing Settings -->
   <div id="view-sharing" class="view-panel">
     <div class="settings-container">
-      <!-- Create Share Card -->
       <div class="fluent-card">
         <div class="card-header">
-          <span>借给好友（创建专属分享码）</span>
-          <span style="font-size: 11px; color: var(--text-muted);">Cloudflare Workers + KV 托管</span>
+          <span>登录模式</span>
+          <span id="activeModeBadge" style="color: var(--accent); font-weight: 500;">本人账号</span>
+        </div>
+        <div class="mode-radio-group" style="flex-direction: row; gap: 10px; padding: 10px 16px;">
+          <label class="mode-option selected" id="optSelf" style="flex: 1; align-items: center;">
+            <input type="radio" name="activeMode" value="self" checked />
+            <span style="font-weight: 500;">本人账号</span>
+          </label>
+          <label class="mode-option" id="optFriend" style="flex: 1; align-items: center;">
+            <input type="radio" name="activeMode" value="friend" />
+            <span style="font-weight: 500;">借用账号</span>
+          </label>
+        </div>
+
+        <div id="friendInputSection" style="display: none; padding: 10px 16px; background: #fafafa; border-top: 1px solid #f0f0f0;">
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input type="text" id="friendShareCode" class="fluent-input" style="flex: 1;" placeholder="粘贴分享码" autocomplete="off" />
+            <button id="btnApplyFriendMode" class="fluent-btn fluent-btn-primary" style="height: 30px;">应用</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="selfLendSection">
+      <div class="fluent-card">
+        <div class="card-header">
+          <span>借出</span>
         </div>
         <div class="setting-row">
-          <label class="setting-label" for="shareMemo">好友备注</label>
+          <label class="setting-label" for="shareMemo">备注</label>
           <div class="control-wrapper">
-            <input type="text" id="shareMemo" class="fluent-input" placeholder="例如：室友老王的笔记本" autocomplete="off" />
+            <input type="text" id="shareMemo" class="fluent-input" placeholder="备注名称" autocomplete="off" />
           </div>
         </div>
         <div class="setting-row">
           <label class="setting-label" for="shareDuration">有效时长</label>
           <div class="control-wrapper">
             <select id="shareDuration" class="fluent-input">
-              <option value="24">24 小时 (临时借用)</option>
-              <option value="168" selected>7 天 (一整周)</option>
-              <option value="720">30 天 (整月)</option>
-              <option value="8760">1 年 (长期互助)</option>
+              <option value="24">24 小时</option>
+              <option value="168" selected>7 天</option>
+              <option value="720">30 天</option>
+              <option value="8760">1 年</option>
             </select>
           </div>
         </div>
         <div id="newShareResultRow" style="display: none; padding: 10px 16px; background: #edf5fc; border-top: 1px solid #d3e5f5;">
-          <div style="font-size: 11.5px; font-weight: 600; color: var(--accent); margin-bottom: 4px;">分享码已生成，点击复制发给好友：</div>
-          <div style="display: flex; gap: 8px;">
+          <div style="display: flex; gap: 8px; align-items: center;">
             <input type="text" id="createdShareCode" class="fluent-input" style="flex: 1; font-family: monospace;" readonly />
             <button id="btnCopyShareCode" class="fluent-btn fluent-btn-primary" style="height: 30px;">复制</button>
           </div>
         </div>
-        <div style="padding: 10px 16px; display: flex; justify-content: flex-end;">
+        <div style="padding: 10px 16px; display: flex; justify-content: flex-end; border-top: 1px solid #f2f2f2;">
           <button id="btnCreateShare" class="fluent-btn fluent-btn-primary">生成分享码</button>
         </div>
       </div>
 
-      <!-- Manage Shares Card -->
       <div class="fluent-card">
         <div class="card-header">
-          <span>我已借出的分享管理</span>
-          <button id="btnRefreshShares" class="mini-btn">刷新云端列表</button>
+          <span>借出管理</span>
+          <button id="btnRefreshShares" class="mini-btn">刷新</button>
         </div>
-        <div style="max-height: 200px; overflow-y: auto;">
+        <div style="max-height: 160px; overflow-y: auto;">
           <table class="share-table">
             <thead>
               <tr>
@@ -555,16 +530,17 @@ const appHTML = `<!DOCTYPE html>
             </thead>
             <tbody id="shareTableBody">
               <tr>
-                <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">暂无活跃的分享</td>
+                <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 14px;">暂无分享</td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
+      </div>
     </div>
   </div>
 
-  <!-- VIEW 4: Logs -->
+  <!-- VIEW 3: Logs -->
   <div id="view-logs" class="view-panel">
     <div class="log-view">
       <div class="log-top">
@@ -592,7 +568,10 @@ const appHTML = `<!DOCTYPE html>
       if (el) el.scrollTop = el.scrollHeight;
     }
     if (name === 'sharing') {
-      loadMyShares();
+      const checked = document.querySelector('input[name="activeMode"]:checked');
+      if (!checked || checked.value === 'self') {
+        loadMyShares();
+      }
     }
   }
   window.switchTab = switchTab;
@@ -673,7 +652,8 @@ const appHTML = `<!DOCTYPE html>
     document.getElementById('optSelf').classList.toggle('selected', isSelf);
     document.getElementById('optFriend').classList.toggle('selected', !isSelf);
     document.getElementById('friendInputSection').style.display = isSelf ? 'none' : 'block';
-    document.getElementById('activeModeBadge').innerText = isSelf ? '自身账号 (本地)' : '借用好友 (云端)';
+    document.getElementById('selfLendSection').style.display = isSelf ? 'block' : 'none';
+    document.getElementById('activeModeBadge').innerText = isSelf ? '本人账号' : '借用账号';
     document.getElementById('activeModeBadge').style.color = isSelf ? 'var(--accent)' : '#b45309';
   }
 
@@ -683,25 +663,29 @@ const appHTML = `<!DOCTYPE html>
       updateModeSelection(mode);
       if (mode === 'self') {
         if (window.switchMode) {
-          window.switchMode('self', '').then(() => showToast('已切换至自身账号登录'));
+          window.switchMode('self', '').then(() => { showToast('已切换至本人账号'); loadMyShares(); });
         }
       }
     });
   });
 
   document.getElementById('btnApplyFriendMode').addEventListener('click', async () => {
+    const btn = document.getElementById('btnApplyFriendMode');
     const code = document.getElementById('friendShareCode').value.trim();
     if (!code) {
       showToast('请输入好友分享码');
       return;
     }
+    btn.disabled = true;
     try {
       if (window.switchMode) {
         await window.switchMode('friend', code);
-        showToast('已切换至借用模式，正在连接云端鉴权...');
+        showToast('已应用借用账号');
       }
     } catch(err) {
-      alert('切换失败: ' + err);
+      alert('应用失败: ' + err);
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -749,8 +733,10 @@ const appHTML = `<!DOCTYPE html>
 
   // Sharing Hub
   document.getElementById('btnCreateShare').addEventListener('click', async () => {
+    const btn = document.getElementById('btnCreateShare');
     const memo = document.getElementById('shareMemo').value.trim() || '好友分享';
     const hours = parseInt(document.getElementById('shareDuration').value, 10) || 168;
+    btn.disabled = true;
     try {
       if (window.publishShare) {
         const code = await window.publishShare(memo, hours);
@@ -761,6 +747,8 @@ const appHTML = `<!DOCTYPE html>
       }
     } catch(err) {
       alert('生成分享码失败: ' + err);
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -782,11 +770,12 @@ const appHTML = `<!DOCTYPE html>
 
   async function loadMyShares() {
     if (!window.listMyShares) return;
+    const tbody = document.getElementById('shareTableBody');
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 14px;">加载中...</td></tr>';
     try {
       const shares = await window.listMyShares();
-      const tbody = document.getElementById('shareTableBody');
       if (!shares || !shares.length) {
-        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">暂无活跃的分享</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 14px;">暂无分享</td></tr>';
         return;
       }
       tbody.innerHTML = shares.map(s => {
@@ -799,6 +788,7 @@ const appHTML = `<!DOCTYPE html>
         '</tr>';
       }).join('');
     } catch(err) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 14px;">加载失败</td></tr>';
       console.error('加载分享列表失败:', err);
     }
   }

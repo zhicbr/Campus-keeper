@@ -134,8 +134,6 @@ func main() {
 			PublishShare:      c.publishShare,
 			RevokeShare:       c.revokeShare,
 			ListMyShares:      c.listMyShares,
-			SaveFriendShare:   c.saveFriendShare,
-			DeleteFriendShare: c.deleteFriendShare,
 		},
 		*console,
 	)
@@ -671,11 +669,26 @@ func (c *controller) prepareLoginConfig(ctx context.Context) (config.Config, err
 
 func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) error {
 	if mode == config.ModeFriend {
-		if strings.TrimSpace(friendShareCode) == "" {
+		code := strings.TrimSpace(friendShareCode)
+		if code == "" {
 			return errors.New("请输入好友分享码")
 		}
-		if _, _, err := sharing.ParseShareCode(friendShareCode); err != nil {
+		shareID, key, err := sharing.ParseShareCode(code)
+		if err != nil {
 			return err
+		}
+		c.mu.Lock()
+		hubURL := c.cfg.CloudHubURL
+		c.mu.Unlock()
+		cloudClient := cloud.NewClient(hubURL)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := cloudClient.FetchShare(ctx, shareID)
+		if err != nil {
+			return err
+		}
+		if _, err := sharing.DecryptCredentials(resp.EncryptedPayload, key); err != nil {
+			return fmt.Errorf("分享码解密失败: %w", err)
 		}
 	}
 
@@ -708,7 +721,7 @@ func (c *controller) publishShare(memo string, durationHours int) (string, error
 	c.mu.Unlock()
 
 	if strings.TrimSpace(cfg.Account) == "" || strings.TrimSpace(cfg.Password) == "" {
-		return "", errors.New("请先在「我的账号」中配置本人的校园网账号与密码，再生成分享")
+		return "", errors.New("请先在「账号配置」中配置本人的校园网账号与密码，再生成分享")
 	}
 
 	key, err := sharing.GenerateRandomKey()
@@ -811,36 +824,6 @@ func (c *controller) listMyShares() ([]cloud.ShareSummary, error) {
 	return cloudClient.ListMyShares(ctx, cfg.OwnerAdminToken)
 }
 
-func (c *controller) saveFriendShare(name, shareCode string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	shareID, _, err := sharing.ParseShareCode(shareCode)
-	if err != nil {
-		return err
-	}
-
-	c.cfg.FriendShares = append(c.cfg.FriendShares, config.FriendShareItem{
-		ID:        shareID,
-		Name:      name,
-		ShareCode: shareCode,
-	})
-	return config.SaveEncryptedConfig(c.cfg)
-}
-
-func (c *controller) deleteFriendShare(id string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var filtered []config.FriendShareItem
-	for _, item := range c.cfg.FriendShares {
-		if item.ID != id {
-			filtered = append(filtered, item)
-		}
-	}
-	c.cfg.FriendShares = filtered
-	return config.SaveEncryptedConfig(c.cfg)
-}
 
 func (c *controller) syncUI() {
 	if c.ui == nil {
