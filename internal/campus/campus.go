@@ -38,6 +38,20 @@ func CampusFromFingerprint(ipv4, gateway, gatewayMAC string) Campus {
 	return ""
 }
 
+// CampusFromIP returns the campus if the IPv4 uniquely matches a known campus subnet.
+func CampusFromIP(ipv4 string) Campus {
+	ip := net.ParseIP(ipv4).To4()
+	if ip == nil {
+		return ""
+	}
+	for _, fp := range compiledTable {
+		if fp.subnet.Contains(ip) {
+			return fp.campus
+		}
+	}
+	return ""
+}
+
 type PortalKind uint8
 
 const (
@@ -98,6 +112,9 @@ func ChooseCampus(mode Campus, portal string, link LinkInfo, remembered Campus) 
 		if remembered == Wenchang || remembered == Nanhu {
 			return remembered, nil // Verified fingerprint; ignore the unknown redirect later.
 		}
+		if site := CampusFromIP(link.IPv4); site != "" {
+			return site, nil
+		}
 		return "", err
 	}
 	if mode != Auto {
@@ -105,6 +122,9 @@ func ChooseCampus(mode Campus, portal string, link LinkInfo, remembered Campus) 
 	}
 	if remembered == Wenchang || remembered == Nanhu {
 		return remembered, nil
+	}
+	if site := CampusFromIP(link.IPv4); site != "" {
+		return site, nil
 	}
 	_ = link // SSID CUMT_Stu exists on both campuses, so it cannot identify Nanhu.
 	return "", errors.New("无法识别：等待网关指纹")

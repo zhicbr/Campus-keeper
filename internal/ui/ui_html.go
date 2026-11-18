@@ -767,9 +767,17 @@ const appHTML = `<!DOCTYPE html>
   document.getElementById('btnCopyShareCode').addEventListener('click', () => {
     const input = document.getElementById('createdShareCode');
     input.select();
-    navigator.clipboard.writeText(input.value).then(() => {
-      showToast('分享码已复制到剪贴板！');
-    });
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(input.value).then(() => {
+        showToast('分享码已复制到剪贴板！');
+      }).catch(() => {
+        document.execCommand('copy');
+        showToast('分享码已复制！');
+      });
+    } else {
+      document.execCommand('copy');
+      showToast('分享码已复制！');
+    }
   });
 
   async function loadMyShares() {
@@ -835,11 +843,12 @@ const appHTML = `<!DOCTYPE html>
         if (logs) logConsole.innerText = logs;
         logConsole.scrollTop = logConsole.scrollHeight;
       }
-      if (window.onUIRendered) {
-        await window.onUIRendered();
-      }
     } catch(e) {
       console.error('UI init error:', e);
+    } finally {
+      if (window.onUIRendered) {
+        try { await window.onUIRendered(); } catch(_) {}
+      }
     }
   })();
 </script>

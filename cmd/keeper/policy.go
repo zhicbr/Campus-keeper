@@ -22,11 +22,12 @@ type DaemonPolicy struct {
 	PostAuthVerifyInterval time.Duration // Interval between verification probes (default: 3s)
 
 	// Wi-Fi roaming and gateway health
-	DeadGatewayThreshold int           // Consecutive missing ARP count before triggering AP roam (default: 6)
-	WiFiResetCooldown    time.Duration // Cooldown between automatic Wi-Fi reset triggers (default: 60s)
-	WiFiInitialDelay     time.Duration // Initial retry delay for Wi-Fi reconnection (default: 10s)
-	HandshakeGracePeriod time.Duration // Grace period after link change before checking dead gateway (default: 60s)
-	MaxConsecutiveRoams  int           // Maximum consecutive AP roams before circuit breaker trips (default: 2)
+	DeadGatewayThreshold int           // Consecutive missing ARP count before triggering AP roam (default: 2)
+	WiFiResetCooldown    time.Duration // Cooldown between automatic Wi-Fi reset triggers (default: 15s)
+	WiFiInitialDelay     time.Duration // Initial retry delay for Wi-Fi reconnection (default: 3s)
+	HandshakeGracePeriod time.Duration // Grace period after link change before checking dead gateway (default: 3s)
+	MaxConsecutiveRoams  int           // Maximum consecutive AP roams before circuit breaker trips (default: 4)
+	RoamDecayDuration    time.Duration // Time window after last roam before resetting consecutive roam count (default: 2m)
 
 	// Retry & Backoff
 	RetryBase       time.Duration // Initial retry base for authentication failure (default: 5s)
@@ -48,11 +49,12 @@ var defaultPolicy = DaemonPolicy{
 	PostAuthVerifyAttempts: 5,
 	PostAuthVerifyInterval: 3 * time.Second,
 
-	DeadGatewayThreshold: 6,
-	WiFiResetCooldown:    60 * time.Second,
-	WiFiInitialDelay:     10 * time.Second,
-	HandshakeGracePeriod: 60 * time.Second,
-	MaxConsecutiveRoams:  2,
+	DeadGatewayThreshold: 2,
+	WiFiResetCooldown:    15 * time.Second,
+	WiFiInitialDelay:     3 * time.Second,
+	HandshakeGracePeriod: 3 * time.Second,
+	MaxConsecutiveRoams:  4,
+	RoamDecayDuration:    2 * time.Minute,
 
 	RetryBase:       5 * time.Second,
 	RetryMax:        5 * time.Minute,
@@ -157,6 +159,15 @@ func WithMaxConsecutiveRoams(n int) Option {
 	return func(p *DaemonPolicy) {
 		if n > 0 {
 			p.MaxConsecutiveRoams = n
+		}
+	}
+}
+
+// WithRoamDecayDuration sets the time window to reset consecutive roam count.
+func WithRoamDecayDuration(d time.Duration) Option {
+	return func(p *DaemonPolicy) {
+		if d > 0 {
+			p.RoamDecayDuration = d
 		}
 	}
 }

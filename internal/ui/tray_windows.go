@@ -143,12 +143,13 @@ type notifyIconData struct {
 }
 
 type DashboardInfo struct {
-	Status   string
-	Network  string
-	Operator string
-	IP       string
-	IsCampus bool
-	State    string
+	Status     string
+	Network    string
+	Operator   string
+	IP         string
+	IsCampus   bool
+	State      string
+	ActiveMode string
 }
 
 // TrayCallbacks encapsulates application callbacks required by the tray UI.
@@ -502,20 +503,19 @@ func (t *TrayUI) webviewLoop(ready chan struct{}) {
 	}
 	wv.Bind("getDashboard", func() (jsDashboard, error) {
 		t.mu.Lock()
-		defer t.mu.Unlock()
-		mode := string(config.ModeSelf)
-		if t.cb.GetConfig != nil {
-			cfg := t.cb.GetConfig()
-			if cfg.ActiveMode != "" {
-				mode = string(cfg.ActiveMode)
-			}
+		dash := t.dash
+		t.mu.Unlock()
+
+		mode := dash.ActiveMode
+		if mode == "" {
+			mode = string(config.ModeSelf)
 		}
 		return jsDashboard{
-			Status:     t.dash.Status,
-			Network:    t.dash.Network,
-			Operator:   t.dash.Operator,
-			IP:         t.dash.IP,
-			IsCampus:   t.dash.IsCampus,
+			Status:     dash.Status,
+			Network:    dash.Network,
+			Operator:   dash.Operator,
+			IP:         dash.IP,
+			IsCampus:   dash.IsCampus,
 			ActiveMode: mode,
 		}, nil
 	})
@@ -645,7 +645,6 @@ func (t *TrayUI) showWindowWithTab(tab string) {
 	t.mu.Lock()
 	wv := t.wv
 	hwnd := t.hwndWebview
-	rendered := t.uiRendered
 	t.windowVisible = true
 	t.pendingTab = tab
 	t.mu.Unlock()
@@ -655,10 +654,8 @@ func (t *TrayUI) showWindowWithTab(tab string) {
 	}
 	wv.Dispatch(func() {
 		wv.Eval(fmt.Sprintf("if (window.switchTab) window.switchTab('%s'); if (window.refreshAll) window.refreshAll();", tab))
-		if rendered {
-			showWindow.Call(hwnd, 5) // SW_SHOW
-			setForegroundWindow.Call(hwnd)
-		}
+		showWindow.Call(hwnd, 5) // SW_SHOW
+		setForegroundWindow.Call(hwnd)
 	})
 }
 
@@ -712,15 +709,16 @@ func (t *TrayUI) showConsole() {
 	}
 }
 
-func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus bool, state string) {
+func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus bool, state string, activeMode string) {
 	t.mu.Lock()
 	t.dash = DashboardInfo{
-		Status:   status,
-		Network:  network,
-		Operator: operator,
-		IP:       ip,
-		IsCampus: isCampus,
-		State:    state,
+		Status:     status,
+		Network:    network,
+		Operator:   operator,
+		IP:         ip,
+		IsCampus:   isCampus,
+		State:      state,
+		ActiveMode: activeMode,
 	}
 	wv := t.wv
 	hwndTray := t.hwndTray
@@ -732,11 +730,12 @@ func (t *TrayUI) UpdateDashboard(status, network, operator, ip string, isCampus 
 
 	if wv != nil {
 		dashData, _ := json.Marshal(map[string]interface{}{
-			"status":   status,
-			"network":  network,
-			"operator": operator,
-			"ip":       ip,
-			"isCampus": isCampus,
+			"status":     status,
+			"network":    network,
+			"operator":   operator,
+			"ip":         ip,
+			"isCampus":   isCampus,
+			"activeMode": activeMode,
 		})
 		wv.Dispatch(func() {
 			wv.Eval(fmt.Sprintf("if (window.onStatusUpdate) window.onStatusUpdate(%s);", string(dashData)))

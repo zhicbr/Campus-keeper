@@ -95,3 +95,16 @@ func TestNanhuLoginMatchesOlderScript(t *testing.T) {
 		t.Fatal("request without portal metadata unexpectedly contains access-controller fields")
 	}
 }
+
+
+func TestDecodePortalMessageErrCode16(t *testing.T) {
+	// Base64 encoding of "Authentication Fail ErrCode=16"
+	raw := "QXV0aGVudGljYXRpb24gRmFpbCBFcnJDb2RlPTE2"
+	decoded := decodePortalMessage(raw)
+	if !strings.Contains(decoded, "ErrCode=16") {
+		t.Fatalf("expected ErrCode=16 in decoded message, got %s", decoded)
+	}
+	if !strings.Contains(decoded, "夜间宿舍定时断网") {
+		t.Fatalf("expected explanation about night curfew/dorm shutdown, got %s", decoded)
+	}
+}

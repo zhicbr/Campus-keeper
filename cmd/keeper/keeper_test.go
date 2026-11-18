@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -270,5 +271,173 @@ func TestManualReconnectResetsBackoff(t *testing.T) {
 	}
 	if c.backoff != defaultPolicy.RetryBase {
 		t.Fatalf("expected backoff reset to retryBase, got %v", c.backoff)
+	}
+}
+
+func TestCampusDetectionFromIPFallback(t *testing.T) {
+	c := &controller{
+		cfg:    config.Config{CampusMode: campus.Auto},
+		link:   network.LinkState{Index: 1, Up: true, Kind: "wifi", IPv4: "10.3.101.56", SSID: "CUMT_Stu"},
+		logger: log.New(io.Discard, "", 0),
+	}
+	c.detectCampusFromLink()
+	if c.campus != campus.Nanhu {
+		t.Fatalf("expected campus Nanhu from 10.3.101.56, got %s", c.campus)
+	}
+
+	c2 := &controller{
+		cfg:    config.Config{CampusMode: campus.Auto},
+		link:   network.LinkState{Index: 2, Up: true, Kind: "wired", IPv4: "10.52.130.12"},
+		logger: log.New(io.Discard, "", 0),
+	}
+	c2.detectCampusFromLink()
+	if c2.campus != campus.Wenchang {
+		t.Fatalf("expected campus Wenchang from 10.52.130.12, got %s", c2.campus)
+	}
+}
+
+func TestCampusLinkFallbackWhenNoRedirectEvidence(t *testing.T) {
+	loginAttempted := false
+	p := portal.NewClient(config.Config{
+		Account:    "testuser",
+		Password:   "testpass",
+		CampusMode: campus.Auto,
+	})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "login") || strings.Contains(r.URL.Path, "eportal") || strings.Contains(r.URL.Host, "10.2.5.251") {
+			loginAttempted = true
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`dr1003({"result":1})`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if loginAttempted && strings.Contains(r.URL.Path, "connecttest.txt") {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("Microsoft Connect Test")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return nil, errors.New("timeout")
+	})})
+
+	pol := defaultPolicy
+	pol.LinkDebounce = time.Millisecond
+	pol.PostAuthVerifyAttempts = 1
+	pol.PostAuthVerifyInterval = time.Millisecond
+	c := &controller{
+		policy: pol,
+		portal: p,
+		cfg: config.Config{
+			Account:    "testuser",
+			Password:   "testpass",
+			CampusMode: campus.Auto,
+		},
+		link: network.LinkState{
+			Index: 1,
+			Up:    true,
+			Kind:  "wifi",
+			SSID:  "CUMT_Stu",
+			IPv4:  "10.3.101.56",
+		},
+		readLink: func(prev network.LinkState) network.LinkState {
+			return prev
+		},
+		logger:     log.New(io.Discard, "", 0),
+		backoff:    defaultPolicy.RetryBase,
+		retryTimer: time.NewTimer(time.Hour),
+		nextReset:  time.Now().Add(24 * time.Hour),
+	}
+	defer stopTimer(c.retryTimer)
+
+	ctx := context.Background()
+	_ = c.cycle(ctx, "测试校园网回退认证")
+	if !loginAttempted {
+		t.Fatal("expected login attempt using fallback portal on known campus link")
+	}
+}
+
+
+func TestSilentProbeDuringBackoff(t *testing.T) {
+	var logBuf bytes.Buffer
+	p := portal.NewClient(config.Config{})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})})
+
+	c := &controller{
+		portal:     p,
+		logger:     log.New(&logBuf, "", 0),
+		state:      "retry-wait",
+		nextRetry:  time.Now().Add(5 * time.Minute), // in backoff
+		retryTimer: time.NewTimer(time.Hour),
+		link: network.LinkState{
+			Index: 1,
+			Up:    true,
+			Kind:  "wifi",
+			SSID:  "CUMT_Stu",
+			IPv4:  "10.3.101.56",
+		},
+		readLink: func(prev network.LinkState) network.LinkState {
+			return prev
+		},
+		nextReset: time.Now().Add(24 * time.Hour),
+	}
+	defer stopTimer(c.retryTimer)
+
+	ctx := context.Background()
+	err := c.cycle(ctx, "定期外网检查")
+	if err != nil {
+		t.Fatalf("expected silent return nil during backoff, got %v", err)
+	}
+	if c.state != "retry-wait" {
+		t.Fatalf("expected state to remain retry-wait, got %s", c.state)
+	}
+	if logBuf.Len() > 0 {
+		t.Fatalf("expected 0 log output during silent opportunistic probe, got: %s", logBuf.String())
+	}
+}
+
+func TestOpportunisticRecoveryDuringBackoff(t *testing.T) {
+	p := portal.NewClient(config.Config{})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader("Microsoft Connect Test")),
+			Header:     make(http.Header),
+		}, nil
+	})})
+
+	c := &controller{
+		portal:     p,
+		logger:     log.New(io.Discard, "", 0),
+		state:      "retry-wait",
+		nextRetry:  time.Now().Add(5 * time.Minute), // in backoff
+		retryTimer: time.NewTimer(time.Hour),
+		link: network.LinkState{
+			Index: 1,
+			Up:    true,
+			Kind:  "wifi",
+			SSID:  "CUMT_Stu",
+			IPv4:  "10.3.101.56",
+		},
+		readLink: func(prev network.LinkState) network.LinkState {
+			return prev
+		},
+		nextReset: time.Now().Add(24 * time.Hour),
+	}
+	defer stopTimer(c.retryTimer)
+
+	ctx := context.Background()
+	err := c.cycle(ctx, "定期外网检查")
+	if err != nil {
+		t.Fatalf("expected nil on recovery, got %v", err)
+	}
+	if c.state != "online" {
+		t.Fatalf("expected state to become online on opportunistic recovery, got %s", c.state)
+	}
+	if !c.nextRetry.IsZero() {
+		t.Fatalf("expected nextRetry to be cleared, got %v", c.nextRetry)
 	}
 }

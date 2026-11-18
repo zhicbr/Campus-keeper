@@ -417,13 +417,15 @@ func decodePortalMessage(raw string) string {
 			}
 		}
 		if printable && str != "" {
-			switch str {
-			case "userid error1":
+			switch {
+			case strings.Contains(str, "userid error1"):
 				return fmt.Sprintf("%s (%s: 账号不存在或当前校区/运营商不匹配)", raw, str)
-			case "userid error2":
+			case strings.Contains(str, "userid error2"):
 				return fmt.Sprintf("%s (%s: 账号已停机或欠费)", raw, str)
-			case "password error":
+			case strings.Contains(str, "password error"):
 				return fmt.Sprintf("%s (%s: 密码错误)", raw, str)
+			case strings.Contains(str, "ErrCode=16"):
+				return fmt.Sprintf("%s (%s: 认证被服务器拒绝，通常为夜间宿舍定时断网/熄灯管制、账号并发数超限或临时抑制)", raw, str)
 			default:
 				return fmt.Sprintf("%s (%s)", raw, str)
 			}

@@ -56,6 +56,7 @@ type controller struct {
 	lastWiFiReset    time.Time
 	reconnectTrigger chan struct{}
 	linkRecheck      chan struct{}
+	readLink         func(network.LinkState) network.LinkState
 }
 
 func main() {
@@ -217,7 +218,7 @@ func (c *controller) run(ctx context.Context) error {
 			if c.resetAtSixIfDue() && c.state != "online" {
 				_ = c.cycle(ctx, "06:00 退避清零")
 			}
-			if !c.quiet && (c.state != "online" || time.Since(c.lastStatusLog) >= p.OnlineStatusInterval) {
+			if !c.quiet && time.Since(c.lastStatusLog) >= p.OnlineStatusInterval {
 				c.logger.Printf("当前状态：%s", c.status())
 				c.lastStatusLog = time.Now()
 			}
@@ -229,6 +230,10 @@ func (c *controller) run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *controller) inBackoff() bool {
+	return !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry)
 }
 
 func triggerGatewayARP(gatewayIP string) {
@@ -265,7 +270,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.portal.SetSourceIP(c.link.IPv4)
 	c.detectCampusFromLink()
 	probeLink := c.link
-	if !c.quiet && (reason != "定期外网检查" || c.state != "online") {
+	if !c.quiet && reason != "定期外网检查" {
 		c.logger.Printf("%s：正在检测 IPv4 网络", reason)
 	}
 	result := c.portal.Probe(ctx)
@@ -285,6 +290,11 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	if result.Redirect != "" {
 		c.lastPortal = result.Redirect
+	}
+	// In backoff window: periodic checks are silent opportunistic probes.
+	// If still offline, exit quietly without spamming logs or flapping state.
+	if c.inBackoff() && reason == "定期外网检查" {
+		return nil
 	}
 	// Confirm a first failure before sending credentials. Captive redirects
 	// are already a definitive sign of unauthenticated IPv4 access.
@@ -327,6 +337,13 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		return errors.New("接口未就绪")
 	}
 	c.detectCampusFromLink()
+	if c.inBackoff() && reason != "手动重连" {
+		c.setState("retry-wait", "等待认证重试")
+		if !c.quiet && reason != "定期外网检查" {
+			c.logger.Printf("认证退避中，预计 %s 后重试", time.Until(c.nextRetry).Round(time.Second))
+		}
+		return errors.New("等待认证重试")
+	}
 	c.setState("offline", "网络中断："+result.Reason)
 	if !network.IsCampusLink(c.link) {
 		return errors.New("当前接口没有校园网特征，等待网络恢复")
@@ -344,6 +361,9 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 			if gwErr != nil || gwMac == "" {
 				if gwIP != "" {
 					triggerGatewayARP(gwIP)
+				}
+				if p.RoamDecayDuration > 0 && time.Since(c.lastWiFiReset) > p.RoamDecayDuration {
+					c.consecutiveRoams = 0
 				}
 				c.deadGatewayCount++
 				if c.deadGatewayCount >= p.DeadGatewayThreshold && time.Since(c.lastWiFiReset) >= p.WiFiResetCooldown {
@@ -363,12 +383,10 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 				}
 			} else {
 				c.deadGatewayCount = 0
-				c.consecutiveRoams = 0
 			}
 		}
 	} else {
 		c.deadGatewayCount = 0
-		c.consecutiveRoams = 0
 	}
 	if !c.nextRetry.IsZero() && time.Now().Before(c.nextRetry) {
 		if reason == "手动重连" {
@@ -384,13 +402,19 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.setState("authenticating", "正在准备校园网认证")
 	decision, err := c.portal.PrepareAuthentication(ctx, result)
 	if err != nil {
-		if ctx.Err() == nil {
-			c.setState("offline", "暂时无法准备校园网认证")
+		if errors.Is(err, portal.ErrNoAuthenticationEvidence) && network.IsCampusLink(c.link) {
+			defaultPortal := "http://" + campus.AuthHost + campus.PathFrontPage
+			c.logger.Printf("未收到跳转特征，但在已知校园网链路上（%s），降级使用默认入口尝试认证：%s", c.link.Describe(), defaultPortal)
+			decision = portal.ProbeResult{Redirect: defaultPortal, Reason: "已知校园网链路默认回退"}
+		} else {
+			if ctx.Err() == nil {
+				c.setState("offline", "暂时无法准备校园网认证")
+			}
+			if ctx.Err() == nil {
+				c.logger.Printf("暂停认证：%v；继续检查网络", err)
+			}
+			return err
 		}
-		if ctx.Err() == nil {
-			c.logger.Printf("暂停认证：%v；继续检查网络", err)
-		}
-		return err
 	}
 	c.refreshLink()
 	if !c.link.SameNetwork(probeLink) {
@@ -516,7 +540,11 @@ func probeLinkCurrent(expected, current network.LinkState) bool {
 }
 
 func (c *controller) refreshLink() bool {
-	next := network.ReadLink(c.link)
+	reader := c.readLink
+	if reader == nil {
+		reader = network.ReadLink
+	}
+	next := reader(c.link)
 	if c.portal != nil && c.portal.Diagnostic() != nil {
 		c.portal.Diagnostic().Log.Printf("controller raw link previous=%+v next=%+v", c.link, next)
 	}
@@ -642,9 +670,6 @@ func (c *controller) prepareLoginConfig(ctx context.Context) (config.Config, err
 }
 
 func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if mode == config.ModeFriend {
 		if strings.TrimSpace(friendShareCode) == "" {
 			return errors.New("请输入好友分享码")
@@ -652,11 +677,19 @@ func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) 
 		if _, _, err := sharing.ParseShareCode(friendShareCode); err != nil {
 			return err
 		}
-		c.cfg.FriendShareCode = strings.TrimSpace(friendShareCode)
 	}
-	c.cfg.ActiveMode = mode
 
-	if err := config.SaveEncryptedConfig(c.cfg); err != nil {
+	cfgToSave := func() config.Config {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if mode == config.ModeFriend {
+			c.cfg.FriendShareCode = strings.TrimSpace(friendShareCode)
+		}
+		c.cfg.ActiveMode = mode
+		return c.cfg
+	}()
+
+	if err := config.SaveEncryptedConfig(cfgToSave); err != nil {
 		return fmt.Errorf("保存配置失败: %w", err)
 	}
 
@@ -761,10 +794,18 @@ func (c *controller) revokeShare(shareID string) error {
 func (c *controller) listMyShares() ([]cloud.ShareSummary, error) {
 	c.mu.Lock()
 	cfg := c.cfg
+	state := c.state
 	c.mu.Unlock()
 
+	if strings.TrimSpace(cfg.CloudHubURL) == "" || strings.TrimSpace(cfg.OwnerAdminToken) == "" {
+		return []cloud.ShareSummary{}, nil
+	}
+	if state != "online" {
+		return []cloud.ShareSummary{}, errors.New("网络未连通，无法获取云端分享")
+	}
+
 	cloudClient := cloud.NewClient(cfg.CloudHubURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	return cloudClient.ListMyShares(ctx, cfg.OwnerAdminToken)
@@ -811,9 +852,13 @@ func (c *controller) syncUI() {
 	opName := c.cfg.OperatorName()
 	ipv4 := c.link.IPv4
 	isCampus := network.IsCampusLink(c.link)
+	activeMode := string(c.cfg.ActiveMode)
+	if activeMode == "" {
+		activeMode = string(config.ModeSelf)
+	}
 	c.mu.Unlock()
 
-	c.ui.UpdateDashboard(st, netSummary, opName, ipv4, isCampus, c.state)
+	c.ui.UpdateDashboard(st, netSummary, opName, ipv4, isCampus, c.state, activeMode)
 }
 
 func (c *controller) status() string {
@@ -895,7 +940,7 @@ func (c *controller) ensureWiFi() error {
 	if err != nil {
 		c.setState("link-down", fmt.Sprintf("有线网不可用；Wi-Fi %s 未接入：%v", network.StudentWiFiProfile, err))
 		c.scheduleWiFiRetry(true)
-		c.logger.Printf("Wi-Fi 连接失败：%v；%s 后重试", err, time.Until(c.nextWiFiTry).Round(time.Second))
+		c.logger.Printf("Wi-Fi 连接失败：%v", err)
 		return err
 	}
 	if status == "已连接" {
@@ -965,12 +1010,16 @@ func (c *controller) detectCampusFromLink() {
 		return
 	}
 	gateway, mac, err := campus.GatewayFingerprint(c.link.Index)
-	if err != nil {
-		return // Neighbor cache may be populated by the following HTTP probe.
+	if err == nil {
+		if site := campus.CampusFromFingerprint(c.link.IPv4, gateway, mac); site != "" {
+			c.campus = site
+			c.logger.Printf("本地网络特征匹配%s：网关 %s，网关 MAC %s；当前 IPv4 %s", campus.CampusName(site), gateway, mac, c.link.IPv4)
+			return
+		}
 	}
-	if site := campus.CampusFromFingerprint(c.link.IPv4, gateway, mac); site != "" {
+	if site := campus.CampusFromIP(c.link.IPv4); site != "" {
 		c.campus = site
-		c.logger.Printf("本地网络特征匹配%s：网关 %s，网关 MAC %s；当前 IPv4 %s", campus.CampusName(site), gateway, mac, c.link.IPv4)
+		c.logger.Printf("本地 IPv4 网段匹配%s（网关 ARP 学习中）：当前 IPv4 %s", campus.CampusName(site), c.link.IPv4)
 	}
 }
 
