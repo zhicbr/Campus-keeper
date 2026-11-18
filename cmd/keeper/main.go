@@ -23,6 +23,7 @@ import (
 	"wenchang-campus-keeper/internal/network"
 	"wenchang-campus-keeper/internal/portal"
 	"wenchang-campus-keeper/internal/sharing"
+	"wenchang-campus-keeper/internal/updater"
 	"wenchang-campus-keeper/internal/ui"
 )
 
@@ -57,6 +58,8 @@ type controller struct {
 	reconnectTrigger chan struct{}
 	linkRecheck      chan struct{}
 	readLink         func(network.LinkState) network.LinkState
+	updateTrigger    chan struct{}
+	notifiedVersion  string
 }
 
 func main() {
@@ -133,7 +136,9 @@ func main() {
 			SwitchMode:        c.switchMode,
 			PublishShare:      c.publishShare,
 			RevokeShare:       c.revokeShare,
-			ListMyShares:      c.listMyShares,
+			ListMyShares:        c.listMyShares,
+			IsAutoUpdateEnabled: c.isAutoUpdateEnabled,
+			ToggleAutoUpdate:    c.toggleAutoUpdate,
 		},
 		*console,
 	)
@@ -152,6 +157,7 @@ func main() {
 		}
 		return
 	}
+	go c.runUpdateLoop(ctx)
 	if err := c.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatal(err)
 	}
@@ -1037,4 +1043,95 @@ func (c *controller) resetAtSixIfDue() bool {
 		stopTimer(c.wifiTimer)
 	}
 	return true
+}
+
+func (c *controller) isAutoUpdateEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg.AutoUpdateEnabled()
+}
+
+func (c *controller) toggleAutoUpdate() (bool, error) {
+	candidate := func() config.Config {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		next := c.cfg
+		next.DisableAutoUpdate = !c.cfg.DisableAutoUpdate
+		return next
+	}()
+
+	if err := config.SaveEncryptedConfig(candidate); err != nil {
+		return !candidate.DisableAutoUpdate, err
+	}
+
+	c.mu.Lock()
+	c.cfg = candidate
+	c.mu.Unlock()
+
+	enabled := candidate.AutoUpdateEnabled()
+	if enabled && c.updateTrigger != nil {
+		select {
+		case c.updateTrigger <- struct{}{}:
+		default:
+		}
+	}
+	return enabled, nil
+}
+
+func (c *controller) runUpdateLoop(ctx context.Context) {
+	if c.updateTrigger == nil {
+		c.updateTrigger = make(chan struct{}, 1)
+	}
+	// Initial delayed check shortly after startup
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(20 * time.Second):
+	case <-c.updateTrigger:
+	}
+	c.checkForUpdates(ctx)
+
+	ticker := time.NewTicker(12 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.checkForUpdates(ctx)
+		case <-c.updateTrigger:
+			c.checkForUpdates(ctx)
+		}
+	}
+}
+
+func (c *controller) checkForUpdates(ctx context.Context) {
+	if !c.isAutoUpdateEnabled() {
+		return
+	}
+	c.mu.Lock()
+	online := c.state == "online"
+	notified := c.notifiedVersion
+	c.mu.Unlock()
+	if !online {
+		return
+	}
+
+	client := updater.NewClient(config.AppVersion)
+	info, hasUpdate, err := client.CheckLatest(ctx, config.AppVersion)
+	if err != nil || !hasUpdate || info == nil {
+		return
+	}
+	if info.Version == notified {
+		return
+	}
+
+	c.mu.Lock()
+	c.notifiedVersion = info.Version
+	c.mu.Unlock()
+
+	c.logger.Printf("发现新版本：%s（当前 v%s），下载地址：%s", info.Version, config.AppVersion, info.ReleaseURL)
+	if c.ui != nil {
+		c.ui.SetAvailableUpdate(info)
+	}
 }

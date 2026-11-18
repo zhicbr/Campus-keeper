@@ -23,6 +23,7 @@ import (
 	"wenchang-campus-keeper/internal/cloud"
 	"wenchang-campus-keeper/internal/config"
 	"wenchang-campus-keeper/internal/diagnostics"
+	"wenchang-campus-keeper/internal/updater"
 )
 
 const (
@@ -31,6 +32,8 @@ const (
 	WakeMessage   = 0x0404 // WM_USER + 4
 
 	nifMessageIconTip = 0x0007
+	nifInfo           = 0x0010
+	niifInfo          = 0x0001
 	nimAdd            = 0x00000000
 	nimModify         = 0x00000001
 	nimDelete         = 0x00000002
@@ -58,7 +61,9 @@ const (
 	menuCmdLogs      = 2004
 	menuCmdOpenDir   = 2005
 	menuCmdExit      = 2006
-	menuCmdAutoStart = 2007
+	menuCmdAutoStart  = 2007
+	menuCmdAutoUpdate = 2008
+	menuCmdOpenUpdate = 2009
 )
 
 var (
@@ -163,7 +168,9 @@ type TrayCallbacks struct {
 	SwitchMode        func(mode config.ActiveMode, shareCode string) error
 	PublishShare      func(memo string, durationHours int) (shareCode string, err error)
 	RevokeShare       func(shareID string) error
-	ListMyShares      func() ([]cloud.ShareSummary, error)
+	ListMyShares        func() ([]cloud.ShareSummary, error)
+	IsAutoUpdateEnabled func() bool
+	ToggleAutoUpdate    func() (enabled bool, err error)
 }
 
 type TrayUI struct {
@@ -180,7 +187,8 @@ type TrayUI struct {
 	dash          DashboardInfo
 	logText       string
 	currentIcon   uintptr
-	menuOpen      bool
+	menuOpen        bool
+	availableUpdate *updater.ReleaseInfo
 
 	cb   TrayCallbacks
 	done chan struct{}
@@ -861,6 +869,26 @@ func (t *TrayUI) updateIconWithErr(action uint32) (bool, error) {
 	return true, nil
 }
 
+func (t *TrayUI) SetAvailableUpdate(info *updater.ReleaseInfo) {
+	t.mu.Lock()
+	t.availableUpdate = info
+	hwnd := t.hwndTray
+	t.mu.Unlock()
+
+	if info == nil || hwnd == 0 {
+		return
+	}
+	var data notifyIconData
+	data.size = uint32(unsafe.Sizeof(data))
+	data.hwnd = hwnd
+	data.id = 1
+	data.flags = nifInfo
+	data.infoFlags = niifInfo
+	copy(data.infoTitle[:], syscall.StringToUTF16("发现新版本 "+info.Version))
+	copy(data.info[:], syscall.StringToUTF16("CampusKeeper 有新版本可用，右键托盘菜单可前往下载。"))
+	shellNotifyIcon.Call(uintptr(nimModify), uintptr(unsafe.Pointer(&data)))
+}
+
 func (t *TrayUI) popupMenu() {
 	t.mu.Lock()
 	if t.menuOpen {
@@ -910,6 +938,23 @@ func (t *TrayUI) popupMenu() {
 	}
 	appendMenu.Call(menu, mfString, menuCmdAutoStart, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(autoStartText))))
 
+	autoUpdateEnabled := true
+	if t.cb.IsAutoUpdateEnabled != nil {
+		autoUpdateEnabled = t.cb.IsAutoUpdateEnabled()
+	}
+	autoUpdateText := "自动检查更新\tOFF"
+	if autoUpdateEnabled {
+		autoUpdateText = "自动检查更新\tON"
+	}
+	appendMenu.Call(menu, mfString, menuCmdAutoUpdate, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(autoUpdateText))))
+
+	t.mu.Lock()
+	availUpd := t.availableUpdate
+	t.mu.Unlock()
+	if availUpd != nil {
+		appendMenu.Call(menu, mfString, menuCmdOpenUpdate, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("发现新版本 "+availUpd.Version+"（前往下载）"))))
+	}
+
 	appendMenu.Call(menu, mfSeparator, 0, 0)
 	appendMenu.Call(menu, mfString, menuCmdExit, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("退出"))))
 
@@ -944,6 +989,23 @@ func (t *TrayUI) popupMenu() {
 			}
 		} else {
 			fmt.Fprintf(t, "[UI] 设置开机自启动失败: %v\n", err)
+		}
+	case menuCmdAutoUpdate:
+		if t.cb.ToggleAutoUpdate != nil {
+			go func() {
+				enabled, err := t.cb.ToggleAutoUpdate()
+				if err != nil {
+					fmt.Fprintf(t, "[UI] 设置自动检查更新失败: %v\n", err)
+				} else if enabled {
+					fmt.Fprintln(t, "[UI] 已开启自动检查更新")
+				} else {
+					fmt.Fprintln(t, "[UI] 已关闭自动检查更新")
+				}
+			}()
+		}
+	case menuCmdOpenUpdate:
+		if availUpd != nil && availUpd.ReleaseURL != "" {
+			go shellExecute.Call(0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("open"))), uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(availUpd.ReleaseURL))), 0, 0, 1)
 		}
 	case menuCmdExit:
 		t.exit()

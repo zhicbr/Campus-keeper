@@ -89,7 +89,8 @@ type Config struct {
 	CloudHubURL     string               `json:"cloud_hub_url,omitempty"`
 	FriendShareCode string               `json:"friend_share_code,omitempty"`
 	FriendShares    []FriendShareItem    `json:"friend_shares,omitempty"`
-	PublishedShares []PublishedShareItem `json:"published_shares,omitempty"`
+	PublishedShares   []PublishedShareItem `json:"published_shares,omitempty"`
+	DisableAutoUpdate bool                 `json:"disable_auto_update,omitempty"`
 }
 
 type storedConfig struct {
@@ -102,7 +103,12 @@ type storedConfig struct {
 	CloudHubURL     string               `json:"cloud_hub_url,omitempty"`
 	FriendShareCode string               `json:"friend_share_code,omitempty"`
 	FriendShares    []FriendShareItem    `json:"friend_shares,omitempty"`
-	PublishedShares []PublishedShareItem `json:"published_shares,omitempty"`
+	PublishedShares   []PublishedShareItem `json:"published_shares,omitempty"`
+	DisableAutoUpdate bool                 `json:"disable_auto_update,omitempty"`
+}
+
+func (c Config) AutoUpdateEnabled() bool {
+	return !c.DisableAutoUpdate
 }
 
 func (c Config) Valid() bool {
@@ -218,7 +224,8 @@ func SaveEncryptedConfig(cfg Config) error {
 		CloudHubURL:     hubURL,
 		FriendShareCode: strings.TrimSpace(cfg.FriendShareCode),
 		FriendShares:    cfg.FriendShares,
-		PublishedShares: cfg.PublishedShares,
+		PublishedShares:   cfg.PublishedShares,
+		DisableAutoUpdate: cfg.DisableAutoUpdate,
 	}
 	if s.Operator == "" {
 		s.Operator = OperatorCMCC
@@ -277,6 +284,7 @@ func LoadEncryptedConfig() (Config, error) {
 		CloudHubURL:     hubURL,
 		FriendShareCode: s.FriendShareCode,
 		FriendShares:    s.FriendShares,
-		PublishedShares: s.PublishedShares,
+		PublishedShares:   s.PublishedShares,
+		DisableAutoUpdate: s.DisableAutoUpdate,
 	}, nil
 }

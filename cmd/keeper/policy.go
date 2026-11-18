@@ -196,6 +196,7 @@ func newController(cfg config.Config, p *portal.Client, logger *log.Logger, quie
 		wifiTimer:        time.NewTimer(time.Hour),
 		reconnectTrigger: make(chan struct{}, 1),
 		linkRecheck:      make(chan struct{}, 1),
+		updateTrigger:    make(chan struct{}, 1),
 		linkConnectedAt:  time.Now(),
 	}
 	stopTimer(c.retryTimer)
