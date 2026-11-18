@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefaultRepo         = "zhicbr/net-keeper"
+	DefaultRepo         = "zhicbr/Campus-keeper"
 	DefaultReleasesAPI  = "https://api.github.com/repos/" + DefaultRepo + "/releases/latest"
 	DefaultReleasesPage = "https://github.com/" + DefaultRepo + "/releases/latest"
 )

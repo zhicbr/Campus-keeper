@@ -34,10 +34,10 @@ func TestCheckLatest(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"tag_name": "v1.0.3",
-			"html_url": "https://github.com/zhicbr/net-keeper/releases/tag/v1.0.3",
+			"html_url": "https://github.com/zhicbr/Campus-keeper/releases/tag/v1.0.3",
 			"body": "Bug fixes",
 			"assets": [
-				{"name": "wenchang-campus-keeper.exe", "browser_download_url": "https://github.com/zhicbr/net-keeper/releases/download/v1.0.3/wenchang-campus-keeper.exe"}
+				{"name": "wenchang-campus-keeper.exe", "browser_download_url": "https://github.com/zhicbr/Campus-keeper/releases/download/v1.0.3/wenchang-campus-keeper.exe"}
 			]
 		}`))
 	}))
@@ -56,7 +56,7 @@ func TestCheckLatest(t *testing.T) {
 	if info.Version != "v1.0.3" {
 		t.Fatalf("unexpected version: %q", info.Version)
 	}
-	if info.DownloadURL != "https://github.com/zhicbr/net-keeper/releases/download/v1.0.3/wenchang-campus-keeper.exe" {
+	if info.DownloadURL != "https://github.com/zhicbr/Campus-keeper/releases/download/v1.0.3/wenchang-campus-keeper.exe" {
 		t.Fatalf("unexpected downloadURL: %q", info.DownloadURL)
 	}
 
