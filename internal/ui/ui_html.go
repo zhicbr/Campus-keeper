@@ -502,12 +502,6 @@ const appHTML = `<!DOCTYPE html>
             </select>
           </div>
         </div>
-        <div id="newShareResultRow" style="display: none; padding: 10px 16px; background: #edf5fc; border-top: 1px solid #d3e5f5;">
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="text" id="createdShareCode" class="fluent-input" style="flex: 1; font-family: monospace;" readonly />
-            <button id="btnCopyShareCode" class="fluent-btn fluent-btn-primary" style="height: 30px;">复制</button>
-          </div>
-        </div>
         <div style="padding: 10px 16px; display: flex; justify-content: flex-end; border-top: 1px solid #f2f2f2;">
           <button id="btnCreateShare" class="fluent-btn fluent-btn-primary">生成分享码</button>
         </div>
@@ -724,47 +718,64 @@ const appHTML = `<!DOCTYPE html>
         hasSavedPassword = hasSavedPassword || Boolean(password);
         document.getElementById('password').value = '';
         updatePasswordPlaceholder();
-        showToast(changed ? '账号配置已保存，正在重新核验' : '配置未变更');
+        const modeRadio = document.querySelector('input[name="activeMode"]:checked');
+        const curMode = modeRadio ? modeRadio.value : 'self';
+        if (changed) {
+          showToast(curMode === 'friend' ? '本人账号已保存（当前仍使用借用账号）' : '账号配置已保存，正在重新核验');
+        } else {
+          showToast('配置未变更');
+        }
       }
     } catch(err) {
       alert('保存失败: ' + err);
     }
   });
 
+  // Clipboard helper
+  function copyText(str) {
+    if (!str) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(str).then(() => {
+        showToast('已复制分享码');
+      }).catch(() => {
+        fallbackCopy(str);
+      });
+    } else {
+      fallbackCopy(str);
+    }
+  }
+  function fallbackCopy(str) {
+    const ta = document.createElement('textarea');
+    ta.value = str;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch(_) {}
+    document.body.removeChild(ta);
+    showToast('已复制分享码');
+  }
+  window.copyShareCode = copyText;
+
   // Sharing Hub
   document.getElementById('btnCreateShare').addEventListener('click', async () => {
     const btn = document.getElementById('btnCreateShare');
-    const memo = document.getElementById('shareMemo').value.trim() || '好友分享';
+    const memoEl = document.getElementById('shareMemo');
+    const memo = memoEl.value.trim() || '好友分享';
     const hours = parseInt(document.getElementById('shareDuration').value, 10) || 168;
     btn.disabled = true;
     try {
       if (window.publishShare) {
         const code = await window.publishShare(memo, hours);
-        document.getElementById('createdShareCode').value = code;
-        document.getElementById('newShareResultRow').style.display = 'block';
-        showToast('分享码创建成功');
+        memoEl.value = '';
+        copyText(code);
+        showToast('已生成并复制分享码');
         loadMyShares();
       }
     } catch(err) {
       alert('生成分享码失败: ' + err);
     } finally {
       btn.disabled = false;
-    }
-  });
-
-  document.getElementById('btnCopyShareCode').addEventListener('click', () => {
-    const input = document.getElementById('createdShareCode');
-    input.select();
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(input.value).then(() => {
-        showToast('分享码已复制到剪贴板！');
-      }).catch(() => {
-        document.execCommand('copy');
-        showToast('分享码已复制！');
-      });
-    } else {
-      document.execCommand('copy');
-      showToast('分享码已复制！');
     }
   });
 
@@ -780,11 +791,14 @@ const appHTML = `<!DOCTYPE html>
       }
       tbody.innerHTML = shares.map(s => {
         const exp = new Date(s.expiresAt).toLocaleDateString();
+        const copyBtn = s.shareCode
+          ? '<button class="mini-btn" style="margin-right:6px;" onclick="copyShareCode(\'' + s.shareCode.replace(/'/g, '') + '\')">复制</button>'
+          : '';
         return '<tr>' +
           '<td><b>' + (s.memo || '未命名') + '</b></td>' +
           '<td>' + (s.operator || '移动') + '</td>' +
           '<td>' + exp + '</td>' +
-          '<td><button class="mini-btn" style="color:#d13438;" onclick="revokeShareItem(\'' + s.shareId + '\')">吊销</button></td>' +
+          '<td>' + copyBtn + '<button class="mini-btn" style="color:#d13438;" onclick="revokeShareItem(\'' + s.shareId + '\')">吊销</button></td>' +
         '</tr>';
       }).join('');
     } catch(err) {
@@ -804,6 +818,32 @@ const appHTML = `<!DOCTYPE html>
       }
     } catch(err) {
       alert('吊销失败: ' + err);
+    }
+  };
+
+  // Refresh logs, status & mode when window is reopened from tray
+  window.refreshAll = async function() {
+    try {
+      if (window.getDashboard) {
+        const d = await window.getDashboard();
+        window.onStatusUpdate(d);
+      }
+      if (window.getLogs) {
+        const logs = await window.getLogs();
+        if (logs) {
+          logConsole.innerText = logs;
+          logConsole.scrollTop = logConsole.scrollHeight;
+        }
+      }
+      if (window.getConfig) {
+        const cfg = await window.getConfig();
+        const mode = cfg.activeMode || 'self';
+        const radio = document.querySelector('input[name="activeMode"][value="' + mode + '"]');
+        if (radio) radio.checked = true;
+        updateModeSelection(mode);
+      }
+    } catch(e) {
+      console.error('UI refresh error:', e);
     }
   };
 

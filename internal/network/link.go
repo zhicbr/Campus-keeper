@@ -178,7 +178,7 @@ func ReadLink(previous LinkState) LinkState {
 		for _, iface := range interfaces {
 			s := snapshotInterface(iface)
 			if s.Kind == kind && s.Ready() && len(iface.HardwareAddr) > 0 {
-				return withSSID(s)
+				return resolveSSID(s, previous, ConnectedSSID())
 			}
 		}
 	}
@@ -211,6 +211,19 @@ func ReadLink(previous LinkState) LinkState {
 func withSSID(s LinkState) LinkState {
 	if s.Kind == "wifi" && s.Up {
 		s.SSID = ConnectedSSID()
+	}
+	return s
+}
+
+// resolveSSID preserves previous.SSID when Windows WlanQueryInterface momentarily returns
+// empty string even though the exact same Wi-Fi interface, Up state, IPv4, and MAC held steady.
+func resolveSSID(s, previous LinkState, queriedSSID string) LinkState {
+	if s.Kind == "wifi" && s.Up {
+		s.SSID = queriedSSID
+		if s.SSID == "" && previous.Kind == "wifi" && previous.SSID != "" &&
+			s.Index == previous.Index && s.Up == previous.Up && s.IPv4 == previous.IPv4 && s.MAC == previous.MAC {
+			s.SSID = previous.SSID
+		}
 	}
 	return s
 }

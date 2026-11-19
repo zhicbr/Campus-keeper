@@ -58,8 +58,12 @@ type controller struct {
 	reconnectTrigger chan struct{}
 	linkRecheck      chan struct{}
 	readLink         func(network.LinkState) network.LinkState
-	updateTrigger    chan struct{}
-	notifiedVersion  string
+	updateTrigger      chan struct{}
+	forceSwitchTrigger chan struct{}
+	selfReloginTrigger chan struct{}
+	notifiedVersion    string
+	cachedFriendCode   string
+	cachedFriendCreds  *sharing.SharedCredentials
 }
 
 func main() {
@@ -200,6 +204,10 @@ func (c *controller) run(ctx context.Context) error {
 			c.resetRetry()
 			c.resetWiFiRetry()
 			_ = c.cycle(ctx, "手动重连")
+		case <-c.forceSwitchTrigger:
+			c.forceSwitchAccount(ctx, true)
+		case <-c.selfReloginTrigger:
+			c.forceSwitchAccount(ctx, false)
 		case <-c.linkRecheck:
 			_ = c.cycle(ctx, "切网后立即复核")
 		case link := <-linkChanges:
@@ -273,6 +281,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.resetWiFiRetry()
 	c.portal.SetSourceIP(c.link.IPv4)
 	c.detectCampusFromLink()
+	startedInBackoff := c.inBackoff()
 	probeLink := c.link
 	if !c.quiet && reason != "定期外网检查" {
 		c.logger.Printf("%s：正在检测 IPv4 网络", reason)
@@ -286,6 +295,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	}
 	if result.Online {
 		c.deadGatewayCount = 0
+		c.consecutiveRoams = 0
 		c.detectCampusFromLink()
 		c.setState("online", "已连通")
 		c.resetRetry()
@@ -296,8 +306,9 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 		c.lastPortal = result.Redirect
 	}
 	// In backoff window: periodic checks are silent opportunistic probes.
-	// If still offline, exit quietly without spamming logs or flapping state.
-	if c.inBackoff() && reason == "定期外网检查" {
+	// Evaluate using startedInBackoff captured before Probe() so a 6s probe timeout
+	// crossing the backoff expiry boundary never hijacks retryTimer.
+	if (startedInBackoff || c.inBackoff()) && reason == "定期外网检查" {
 		return nil
 	}
 	// Confirm a first failure before sending credentials. Captive redirects
@@ -556,13 +567,17 @@ func (c *controller) refreshLink() bool {
 }
 
 func (c *controller) adoptLink(next network.LinkState) bool {
+	c.mu.Lock()
 	if next == c.link {
+		c.mu.Unlock()
 		return false
 	}
-	if !next.SameNetwork(c.link) || (!c.link.Ready() && next.Ready()) {
+	switched := !next.SameNetwork(c.link) || (!c.link.Ready() && next.Ready())
+	hadContext := false
+	if switched {
 		// An online result from the previous network is no longer valid.
 		c.state = "checking"
-		hadContext := c.campus != "" || c.lastPortal != "" || !c.nextRetry.IsZero()
+		hadContext = c.campus != "" || c.lastPortal != "" || !c.nextRetry.IsZero()
 		c.lastPortal = ""
 		c.campus = ""
 		c.resetRetry()
@@ -570,23 +585,27 @@ func (c *controller) adoptLink(next network.LinkState) bool {
 		c.deadGatewayCount = 0
 		c.consecutiveRoams = 0
 		c.linkConnectedAt = time.Now()
-		if hadContext && c.logger != nil {
-			c.logger.Print("网络已切换；清除认证及重试缓存")
-		}
 	}
 	c.link = next
+	c.mu.Unlock()
+	if switched && hadContext && c.logger != nil {
+		c.logger.Print("网络已切换；清除认证及重试缓存")
+	}
 	c.syncUI()
 	return true
 }
 
 func (c *controller) setState(next, message string) {
-	if c.state != next {
+	c.mu.Lock()
+	prev := c.state
+	c.state = next
+	c.mu.Unlock()
+	if prev != next {
 		if c.portal != nil && c.portal.Diagnostic() != nil {
 			c.portal.Diagnostic().Trigger("state-change:" + next)
 		}
-		c.logger.Printf("状态变化：%s → %s；%s", stateName(c.state), stateName(next), message)
+		c.logger.Printf("状态变化：%s → %s；%s", stateName(prev), stateName(next), message)
 	}
-	c.state = next
 	c.syncUI()
 }
 
@@ -627,9 +646,16 @@ func (c *controller) updateConfig(account, password, opStr string) (bool, error)
 	c.logger.Printf("登录配置已更新；账号 %s；运营商 %s", config.Mask(candidate.Account), candidate.OperatorName())
 	c.syncUI()
 
-	select {
-	case c.reconnectTrigger <- struct{}{}:
-	default:
+	if candidate.ActiveMode != config.ModeFriend && c.selfReloginTrigger != nil {
+		select {
+		case c.selfReloginTrigger <- struct{}{}:
+		default:
+		}
+	} else {
+		select {
+		case c.reconnectTrigger <- struct{}{}:
+		default:
+		}
 	}
 	return true, nil
 }
@@ -637,6 +663,12 @@ func (c *controller) updateConfig(account, password, opStr string) (bool, error)
 func (c *controller) prepareLoginConfig(ctx context.Context) (config.Config, error) {
 	c.mu.Lock()
 	cfg := c.cfg
+	cachedCode := c.cachedFriendCode
+	var cachedCreds *sharing.SharedCredentials
+	if c.cachedFriendCreds != nil {
+		cp := *c.cachedFriendCreds
+		cachedCreds = &cp
+	}
 	c.mu.Unlock()
 
 	if cfg.ActiveMode != config.ModeFriend {
@@ -655,14 +687,36 @@ func (c *controller) prepareLoginConfig(ctx context.Context) (config.Config, err
 
 	cloudClient := cloud.NewClient(cfg.CloudHubURL)
 	c.logger.Printf("正在从云端拉取好友分享凭据: shareID=%s", shareID)
+	var creds *sharing.SharedCredentials
 	resp, err := cloudClient.FetchShare(ctx, shareID)
 	if err != nil {
-		return cfg, fmt.Errorf("拉取好友分享凭据失败: %w", err)
-	}
-
-	creds, err := sharing.DecryptCredentials(resp.EncryptedPayload, key)
-	if err != nil {
-		return cfg, fmt.Errorf("解密好友分享凭据失败: %w", err)
+		errMsg := err.Error()
+		revokedOrExpired := strings.Contains(errMsg, "不存在或已被所有者吊销") || strings.Contains(errMsg, "已过期")
+		if revokedOrExpired {
+			c.mu.Lock()
+			if c.cachedFriendCode == code {
+				c.cachedFriendCode = ""
+				c.cachedFriendCreds = nil
+			}
+			c.mu.Unlock()
+			return cfg, fmt.Errorf("拉取好友分享凭据失败: %w", err)
+		}
+		if cachedCreds != nil && cachedCode == code {
+			c.logger.Printf("当前无法直连云端（%v），使用本次会话已拉取的好友分享凭据进行登录", err)
+			creds = cachedCreds
+		} else {
+			return cfg, fmt.Errorf("拉取好友分享凭据失败: %w", err)
+		}
+	} else {
+		creds, err = sharing.DecryptCredentials(resp.EncryptedPayload, key)
+		if err != nil {
+			return cfg, fmt.Errorf("解密好友分享凭据失败: %w", err)
+		}
+		cp := *creds
+		c.mu.Lock()
+		c.cachedFriendCode = code
+		c.cachedFriendCreds = &cp
+		c.mu.Unlock()
 	}
 
 	c.logger.Printf("已成功获取好友分享凭据 (备注: %s, 运营商: %s)", creds.Memo, creds.Operator)
@@ -674,12 +728,14 @@ func (c *controller) prepareLoginConfig(ctx context.Context) (config.Config, err
 }
 
 func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) error {
+	var fetchedCreds *sharing.SharedCredentials
+	var cleanCode string
 	if mode == config.ModeFriend {
-		code := strings.TrimSpace(friendShareCode)
-		if code == "" {
+		cleanCode = strings.TrimSpace(friendShareCode)
+		if cleanCode == "" {
 			return errors.New("请输入好友分享码")
 		}
-		shareID, key, err := sharing.ParseShareCode(code)
+		shareID, key, err := sharing.ParseShareCode(cleanCode)
 		if err != nil {
 			return err
 		}
@@ -693,16 +749,23 @@ func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) 
 		if err != nil {
 			return err
 		}
-		if _, err := sharing.DecryptCredentials(resp.EncryptedPayload, key); err != nil {
+		creds, err := sharing.DecryptCredentials(resp.EncryptedPayload, key)
+		if err != nil {
 			return fmt.Errorf("分享码解密失败: %w", err)
 		}
+		fetchedCreds = creds
 	}
 
 	cfgToSave := func() config.Config {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if mode == config.ModeFriend {
-			c.cfg.FriendShareCode = strings.TrimSpace(friendShareCode)
+			c.cfg.FriendShareCode = cleanCode
+			c.cachedFriendCode = cleanCode
+			c.cachedFriendCreds = fetchedCreds
+		} else {
+			c.cachedFriendCode = ""
+			c.cachedFriendCreds = nil
 		}
 		c.cfg.ActiveMode = mode
 		return c.cfg
@@ -714,11 +777,74 @@ func (c *controller) switchMode(mode config.ActiveMode, friendShareCode string) 
 
 	c.logger.Printf("运行模式已切换为：%s", mode)
 	c.syncUI()
-	select {
-	case c.reconnectTrigger <- struct{}{}:
-	default:
+	if c.forceSwitchTrigger != nil {
+		select {
+		case c.forceSwitchTrigger <- struct{}{}:
+		default:
+		}
 	}
 	return nil
+}
+
+func (c *controller) forceSwitchAccount(ctx context.Context, switchToCampusWiFi bool) {
+	c.resetRetry()
+	c.resetWiFiRetry()
+	c.refreshLink()
+
+	if !c.link.Ready() || !network.IsCampusLink(c.link) {
+		if !switchToCampusWiFi {
+			_ = c.cycle(ctx, "配置更新核查")
+			return
+		}
+		c.logger.Printf("当前不在校园网链路（%s），正在断开当前网络并自动切换至 %s...", c.link.Describe(), network.StudentWiFiProfile)
+		c.setState("wifi-connecting", "正在切换至校园网 "+network.StudentWiFiProfile)
+		if err := network.ReconnectSavedWiFi(network.StudentWiFiProfile, c.portal.Diagnostic()); err != nil {
+			c.logger.Printf("自动切换校园网 %s 失败：%v", network.StudentWiFiProfile, err)
+			_ = c.cycle(ctx, "切换模式核查")
+			return
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			c.refreshLink()
+			if c.link.Ready() && network.IsCampusLink(c.link) {
+				break
+			}
+		}
+		if !c.link.Ready() || !network.IsCampusLink(c.link) {
+			_ = c.cycle(ctx, "切换校园网重连")
+			return
+		}
+	} else {
+		c.portal.SetSourceIP(c.link.IPv4)
+		c.detectCampusFromLink()
+		site := c.campus
+		if site == "" {
+			site, _ = campus.ChooseCampus(c.cfg.CampusMode, c.lastPortal, c.link.LinkInfo(), c.campus)
+		}
+		if site == "" {
+			site = campus.Nanhu
+		}
+
+		c.logger.Printf("正在注销当前校园网会话以切换账号登录...")
+		if err := c.portal.Logout(ctx, site, c.lastPortal, c.link.IPv4, c.link.MAC); err != nil {
+			c.logger.Printf("注销旧会话返回：%v（继续尝试新账号登录）", err)
+		} else {
+			c.logger.Printf("旧会话已注销，准备使用新模式账号登录")
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(800 * time.Millisecond):
+		}
+	}
+
+	_ = c.cycle(ctx, "切换账号重连")
 }
 
 func (c *controller) publishShare(memo string, durationHours int) (string, error) {
@@ -774,6 +900,7 @@ func (c *controller) publishShare(memo string, durationHours int) (string, error
 		Memo:      memo,
 		CreatedAt: time.Now().UnixMilli(),
 		ExpiresAt: pubResp.ExpiresAt,
+		ShareCode: shareCode,
 	})
 	_ = config.SaveEncryptedConfig(c.cfg)
 	c.mu.Unlock()
@@ -814,12 +941,13 @@ func (c *controller) listMyShares() ([]cloud.ShareSummary, error) {
 	c.mu.Lock()
 	cfg := c.cfg
 	state := c.state
+	link := c.link
 	c.mu.Unlock()
 
 	if strings.TrimSpace(cfg.CloudHubURL) == "" || strings.TrimSpace(cfg.OwnerAdminToken) == "" {
 		return []cloud.ShareSummary{}, nil
 	}
-	if state != "online" {
+	if !link.Ready() || (network.IsCampusLink(link) && (state == "offline" || state == "link-down" || state == "retry-wait" || state == "config-required")) {
 		return []cloud.ShareSummary{}, errors.New("网络未连通，无法获取云端分享")
 	}
 
@@ -827,7 +955,22 @@ func (c *controller) listMyShares() ([]cloud.ShareSummary, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	return cloudClient.ListMyShares(ctx, cfg.OwnerAdminToken)
+	shares, err := cloudClient.ListMyShares(ctx, cfg.OwnerAdminToken)
+	if err != nil {
+		return nil, err
+	}
+	codeByID := make(map[string]string, len(cfg.PublishedShares))
+	for _, item := range cfg.PublishedShares {
+		if item.ShareCode != "" {
+			codeByID[item.ShareID] = item.ShareCode
+		}
+	}
+	for i := range shares {
+		if code, ok := codeByID[shares[i].ShareID]; ok {
+			shares[i].ShareCode = code
+		}
+	}
+	return shares, nil
 }
 
 

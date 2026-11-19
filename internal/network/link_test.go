@@ -52,3 +52,24 @@ func TestNetworkSummary(t *testing.T) {
 		})
 	}
 }
+
+
+func TestResolveSSIDPreservesTransientEmptyRead(t *testing.T) {
+	prev := LinkState{Index: 2, Name: "WLAN", Kind: "wifi", SSID: StudentWiFiProfile, Up: true, IPv4: "10.3.249.106", MAC: "aabbccddeeff"}
+	curSame := LinkState{Index: 2, Name: "WLAN", Kind: "wifi", Up: true, IPv4: "10.3.249.106", MAC: "aabbccddeeff"}
+	got := resolveSSID(curSame, prev, "")
+	if got.SSID != StudentWiFiProfile {
+		t.Fatalf("expected transient empty SSID to keep %q, got %q", StudentWiFiProfile, got.SSID)
+	}
+
+	curNewIP := LinkState{Index: 2, Name: "WLAN", Kind: "wifi", Up: true, IPv4: "192.168.1.10", MAC: "aabbccddeeff"}
+	gotDiff := resolveSSID(curNewIP, prev, "")
+	if gotDiff.SSID != "" {
+		t.Fatalf("expected different IPv4 not to inherit old SSID, got %q", gotDiff.SSID)
+	}
+
+	gotSwitched := resolveSSID(curSame, prev, "OtherWiFi")
+	if gotSwitched.SSID != "OtherWiFi" {
+		t.Fatalf("expected explicit new SSID, got %q", gotSwitched.SSID)
+	}
+}

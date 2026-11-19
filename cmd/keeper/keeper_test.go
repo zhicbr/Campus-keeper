@@ -441,3 +441,44 @@ func TestOpportunisticRecoveryDuringBackoff(t *testing.T) {
 		t.Fatalf("expected nextRetry to be cleared, got %v", c.nextRetry)
 	}
 }
+
+
+func TestSilentProbeDoesNotHijackWhenBackoffExpiresMidProbe(t *testing.T) {
+	var logBuf bytes.Buffer
+	c := &controller{
+		logger:    log.New(&logBuf, "", 0),
+		state:     "retry-wait",
+		nextRetry: time.Now().Add(40 * time.Millisecond), // expires mid-probe
+		retryTimer: time.NewTimer(time.Hour),
+		link: network.LinkState{
+			Index: 1,
+			Up:    true,
+			Kind:  "wifi",
+			SSID:  network.StudentWiFiProfile,
+			IPv4:  "10.3.101.56",
+		},
+		readLink: func(prev network.LinkState) network.LinkState {
+			return prev
+		},
+		nextReset: time.Now().Add(24 * time.Hour),
+	}
+	defer stopTimer(c.retryTimer)
+
+	p := portal.NewClient(config.Config{})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		time.Sleep(80 * time.Millisecond) // slow probe exceeds 40ms nextRetry
+		return nil, errors.New("network down")
+	})})
+	c.portal = p
+
+	err := c.cycle(context.Background(), "定期外网检查")
+	if err != nil {
+		t.Fatalf("expected silent nil return when probe started in backoff, got %v", err)
+	}
+	if c.state != "retry-wait" {
+		t.Fatalf("expected state retry-wait, got %s", c.state)
+	}
+	if logBuf.Len() > 0 {
+		t.Fatalf("expected zero log spam, got: %s", logBuf.String())
+	}
+}

@@ -75,6 +75,7 @@ type ShareSummary struct {
 	Operator  string `json:"operator"`
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt"`
+	ShareCode string `json:"shareCode,omitempty"`
 }
 
 type ListSharesResponse struct {

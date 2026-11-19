@@ -44,6 +44,7 @@ type PublishedShareItem struct {
 	Memo      string `json:"memo"`
 	CreatedAt int64  `json:"created_at"`
 	ExpiresAt int64  `json:"expires_at"`
+	ShareCode string `json:"share_code,omitempty"`
 }
 
 func (op Operator) DisplayName() string {

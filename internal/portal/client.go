@@ -305,12 +305,12 @@ func (p *Client) probeDirectPortal(ctx context.Context) string {
 	return ""
 }
 
-func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
+func (p *Client) buildPortalActionURL(action string, site campus.Campus, portal, currentIP, currentMAC string) (string, error) {
 	if site != campus.Wenchang && site != campus.Nanhu {
-		return errors.New("校区未识别，不能发送账号密码")
+		return "", errors.New("校区未识别，不能发送账号密码")
 	}
 	if _, err := campus.ClassifyPortal(portal); err != nil {
-		return err
+		return "", err
 	}
 	p.mu.RLock()
 	cfg := p.cfg
@@ -333,7 +333,7 @@ func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentI
 		}
 	}
 	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
-		return errors.New("没有可用的校园网 IPv4 地址")
+		return "", errors.New("没有可用的校园网 IPv4 地址")
 	}
 	account := cfg.AccountFor(site)
 	mac := "000000000000"
@@ -347,7 +347,7 @@ func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentI
 	stamp := time.Now().UnixMilli()
 	queryParts := []string{
 		"c=Portal",
-		"a=login",
+		"a=" + action,
 		fmt.Sprintf("callback=dr%d", stamp),
 		"login_method=1",
 		"user_account=" + account,
@@ -365,7 +365,33 @@ func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentI
 	}
 	queryParts = append(queryParts, "jsVersion=3.0", fmt.Sprintf("_=%d", stamp))
 	base.RawQuery = strings.Join(queryParts, "&")
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	return base.String(), nil
+}
+
+// Logout terminates the active campus portal session for the current IP.
+func (p *Client) Logout(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
+	actionURL, err := p.buildPortalActionURL("logout", site, portal, currentIP, currentMAC)
+	if err != nil {
+		return err
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, actionURL, nil)
+	resp, err := p.doDiagnostic(request, "logout")
+	if err != nil {
+		return errors.New("注销接口不可达或请求超时")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("注销接口返回 HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
+	actionURL, err := p.buildPortalActionURL("login", site, portal, currentIP, currentMAC)
+	if err != nil {
+		return err
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, actionURL, nil)
 	resp, err := p.doDiagnostic(request, "login")
 	if err != nil {
 		return errors.New("认证接口不可达或请求超时")

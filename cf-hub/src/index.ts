@@ -66,9 +66,9 @@ export default {
 
     // 2. Fetch a friend's share (Public read-only: no auth required)
     // GET /api/share/:share_id
-    if (request.method === "GET" && path.startsWith("/api/share/")) {
+    if (request.method === "GET" && path.startsWith("/api/share/") && path !== "/api/share/my") {
       const shareId = path.replace("/api/share/", "").trim();
-      if (!shareId || shareId.includes("/") || shareId === "my") {
+      if (!shareId || shareId.includes("/")) {
         return jsonResponse({ error: "invalid_share_id" }, 400);
       }
 
