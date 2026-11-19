@@ -64,6 +64,7 @@ type controller struct {
 	notifiedVersion    string
 	cachedFriendCode   string
 	cachedFriendCreds  *sharing.SharedCredentials
+	lastLoginAttempt   time.Time
 }
 
 func main() {
@@ -483,6 +484,7 @@ func (c *controller) cycle(ctx context.Context, reason string) error {
 	c.portal.SetConfig(loginCfg)
 
 	c.logger.Printf("尝试%s认证：%s", campus.CampusName(site), portal.SafePortal(portalURL))
+	c.lastLoginAttempt = time.Now()
 	if err := c.portal.Login(ctx, site, portalURL, c.link.IPv4, c.link.MAC); err != nil {
 		if cancelled := ctx.Err(); cancelled != nil {
 			return cancelled
@@ -791,6 +793,8 @@ func (c *controller) forceSwitchAccount(ctx context.Context, switchToCampusWiFi 
 	c.resetWiFiRetry()
 	c.refreshLink()
 
+	beforeSwitch := time.Now()
+	switchedAccount := false
 	if !c.link.Ready() || !network.IsCampusLink(c.link) {
 		if !switchToCampusWiFi {
 			_ = c.cycle(ctx, "配置更新核查")
@@ -820,6 +824,7 @@ func (c *controller) forceSwitchAccount(ctx context.Context, switchToCampusWiFi 
 			return
 		}
 	} else {
+		switchedAccount = true
 		c.portal.SetSourceIP(c.link.IPv4)
 		c.detectCampusFromLink()
 		site := c.campus
@@ -827,24 +832,28 @@ func (c *controller) forceSwitchAccount(ctx context.Context, switchToCampusWiFi 
 			site, _ = campus.ChooseCampus(c.cfg.CampusMode, c.lastPortal, c.link.LinkInfo(), c.campus)
 		}
 		if site == "" {
-			site = campus.Nanhu
-		}
-
-		c.logger.Printf("正在注销当前校园网会话以切换账号登录...")
-		if err := c.portal.Logout(ctx, site, c.lastPortal, c.link.IPv4, c.link.MAC); err != nil {
-			c.logger.Printf("注销旧会话返回：%v（继续尝试新账号登录）", err)
+			c.logger.Print("未识别当前所属校区，跳过门户注销并核验网络状态")
 		} else {
-			c.logger.Printf("旧会话已注销，准备使用新模式账号登录")
-		}
+			c.logger.Printf("正在注销当前%s校园网会话以切换账号登录...", campus.CampusName(site))
+			if err := c.portal.Logout(ctx, site, c.lastPortal, c.link.IPv4, c.link.MAC); err != nil {
+				c.logger.Printf("注销旧会话返回：%v（继续核验网络状态）", err)
+			} else {
+				c.logger.Printf("旧会话已注销，准备使用新模式账号登录")
+			}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(800 * time.Millisecond):
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(800 * time.Millisecond):
+			}
+			c.setState("checking", "正在核验旧会话是否已注销")
 		}
 	}
 
-	_ = c.cycle(ctx, "切换账号重连")
+	err := c.cycle(ctx, "切换账号重连")
+	if switchedAccount && err == nil && c.lastLoginAttempt.Before(beforeSwitch) {
+		c.logger.Print("提示：注销后外网仍处于连通状态，校园网旧会话可能未实际下线（或存在无感知/代理），本次未触发新账号认证")
+	}
 }
 
 func (c *controller) publishShare(memo string, durationHours int) (string, error) {

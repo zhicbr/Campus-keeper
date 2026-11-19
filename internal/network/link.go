@@ -46,10 +46,8 @@ func (s LinkState) NetworkSummary(site campus.Campus) string {
 	}
 	if IsCampusLink(s) {
 		name := "校园网"
-		if site == campus.Nanhu {
-			name = "南湖"
-		} else if site == campus.Wenchang {
-			name = "文昌"
+		if campus.IsKnownCampus(site) {
+			name = campus.CampusName(site)
 		}
 		if s.Kind == "wifi" {
 			return name + " (Wi-Fi)"

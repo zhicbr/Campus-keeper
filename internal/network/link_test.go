@@ -32,6 +32,12 @@ func TestNetworkSummary(t *testing.T) {
 			expected: "南湖 (Wi-Fi)",
 		},
 		{
+			name:     "campus wifi continuing edu",
+			link:     LinkState{Index: 5, Up: true, IPv4: "10.27.176.53", Kind: "wifi", SSID: StudentWiFiProfile},
+			site:     campus.ContinuingEdu,
+			expected: "继续教育学院 (Wi-Fi)",
+		},
+		{
 			name:     "external wifi",
 			link:     LinkState{Index: 3, Up: true, IPv4: "192.168.1.50", Kind: "wifi", SSID: "MyPhoneHotspot"},
 			site:     campus.Auto,

@@ -59,4 +59,13 @@ func TestCampusFingerprintRequiresGatewayMACAndSubnet(t *testing.T) {
 	if got := CampusFromFingerprint("10.3.233.69", "10.3.255.254", "7C-1E-06-8F-98-02"); got != "" {
 		t.Fatal("Nanhu IP without its gateway MAC was incorrectly classified")
 	}
+	if got := CampusFromFingerprint("10.27.176.53", "10.27.255.254", "00-74-9C-B4-F0-5C"); got != ContinuingEdu {
+		t.Fatal("known ContinuingEdu link was not matched")
+	}
+	if got := CampusFromFingerprint("10.27.176.53", "10.27.255.254", "7C-1E-06-8F-98-02"); got != "" {
+		t.Fatal("ContinuingEdu IP without its gateway MAC was incorrectly classified")
+	}
+	if got := CampusName(ContinuingEdu); got != "继续教育学院" {
+		t.Fatalf("unexpected ContinuingEdu name: %q", got)
+	}
 }

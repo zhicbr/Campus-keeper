@@ -11,10 +11,16 @@ import (
 type Campus string
 
 const (
-	Auto     Campus = "auto"
-	Wenchang Campus = "wenchang"
-	Nanhu    Campus = "nanhu"
+	Auto          Campus = "auto"
+	Wenchang      Campus = "wenchang"
+	Nanhu         Campus = "nanhu"
+	ContinuingEdu Campus = "continuing_edu"
 )
+
+// IsKnownCampus reports whether site is a configured concrete campus.
+func IsKnownCampus(site Campus) bool {
+	return site == Wenchang || site == Nanhu || site == ContinuingEdu
+}
 
 type LinkInfo struct {
 	Kind string
@@ -66,6 +72,8 @@ func CampusName(site Campus) string {
 		return "文昌"
 	case Nanhu:
 		return "南湖"
+	case ContinuingEdu:
+		return "继续教育学院"
 	default:
 		return "未识别"
 	}
@@ -106,10 +114,10 @@ func safePortal(raw string) string {
 func ChooseCampus(mode Campus, portal string, link LinkInfo, remembered Campus) (Campus, error) {
 	_, err := ClassifyPortal(portal)
 	if err != nil {
-		if mode == Wenchang || mode == Nanhu {
+		if IsKnownCampus(mode) {
 			return mode, nil // Explicit campus; login still uses the fixed trusted backend.
 		}
-		if remembered == Wenchang || remembered == Nanhu {
+		if IsKnownCampus(remembered) {
 			return remembered, nil // Verified fingerprint; ignore the unknown redirect later.
 		}
 		if site := CampusFromIP(link.IPv4); site != "" {
@@ -120,12 +128,12 @@ func ChooseCampus(mode Campus, portal string, link LinkInfo, remembered Campus) 
 	if mode != Auto {
 		return mode, nil
 	}
-	if remembered == Wenchang || remembered == Nanhu {
+	if IsKnownCampus(remembered) {
 		return remembered, nil
 	}
 	if site := CampusFromIP(link.IPv4); site != "" {
 		return site, nil
 	}
-	_ = link // SSID CUMT_Stu exists on both campuses, so it cannot identify Nanhu.
+	_ = link // SSID CUMT_Stu exists across campuses, so it cannot identify a site alone.
 	return "", errors.New("无法识别：等待网关指纹")
 }

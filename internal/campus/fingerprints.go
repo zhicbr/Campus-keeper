@@ -31,6 +31,13 @@ var KnownFingerprints = []NetworkFingerprint{
 		GatewayMAC: "80-05-88-46-B4-F9",
 		Comment:    "南湖校区无线 CUMT_Stu 观测样本",
 	},
+	{
+		Campus:     ContinuingEdu,
+		SubnetCIDR: "10.27.0.0/16",
+		GatewayIP:  "10.27.255.254",
+		GatewayMAC: "00-74-9C-B4-F0-5C",
+		Comment:    "继续教育学院无线 CUMT_Stu 观测样本",
+	},
 }
 
 type compiledFingerprint struct {

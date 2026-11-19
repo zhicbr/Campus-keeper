@@ -108,3 +108,68 @@ func TestDecodePortalMessageErrCode16(t *testing.T) {
 		t.Fatalf("expected explanation about night curfew/dorm shutdown, got %s", decoded)
 	}
 }
+
+func TestContinuingEduLoginUsesInterfaceMACAndACParams(t *testing.T) {
+	var got *url.URL
+	p := NewClient(config.Config{Account: "student", Password: "secret", Operator: config.OperatorTelecom})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got = r.URL
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`dr123({"result":"1"})`)), Header: make(http.Header)}, nil
+	})})
+	err := p.Login(context.Background(), campus.ContinuingEdu, "http://10.2.5.251/a79.htm?wlanuserip=10.27.176.53&wlanacname=AC_PARK&wlanacip=10.27.0.1", "10.27.176.53", "08-8E-90-19-58-B6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := got.Query()
+	for k, want := range map[string]string{
+		"user_account":  "student@dx",
+		"wlan_user_ip":  "10.27.176.53",
+		"wlan_user_mac": "088E901958B6",
+		"wlan_ac_name":  "AC_PARK",
+		"wlan_ac_ip":    "10.27.0.1",
+	} {
+		if q.Get(k) != want {
+			t.Fatalf("%s = %q, want %q", k, q.Get(k), want)
+		}
+	}
+}
+
+func TestLogoutChecksJSONPAndFallsBackToDrcom(t *testing.T) {
+	p := NewClient(config.Config{Account: "student", Password: "secret"})
+	// 1. Both :801 eportal logout and :80 /drcom/logout return result=0 -> must fail instead of falsely succeeding on HTTP 200.
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`dr123({"result":"0","msg":"logout rejected"})`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	err := p.Logout(context.Background(), campus.ContinuingEdu, "", "10.27.176.53", "08-8E-90-19-58-B6")
+	if err == nil || !strings.Contains(err.Error(), "logout rejected") {
+		t.Fatalf("expected logout failure containing server message, got %v", err)
+	}
+
+	// 2. :801 eportal logout returns result=0, fallback :80 /drcom/logout returns result=1 -> must succeed.
+	var hitDrcom bool
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/drcom/logout" {
+			hitDrcom = true
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`dr456({"result":1})`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`dr123({"result":"0","msg":"not online on 801"})`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	if err := p.Logout(context.Background(), campus.ContinuingEdu, "", "10.27.176.53", "08-8E-90-19-58-B6"); err != nil {
+		t.Fatalf("expected /drcom/logout fallback to succeed, got %v", err)
+	}
+	if !hitDrcom {
+		t.Fatal("expected fallback call to /drcom/logout")
+	}
+}

@@ -4,6 +4,9 @@ const (
 	// DefaultBackendURL is the fixed eportal login submission endpoint for both campuses.
 	DefaultBackendURL = "http://10.2.5.251:801/eportal/"
 
+	// DefaultDrcomLogoutURL is the Dr.COM port-80 fallback logout endpoint used by a42.js when loginMethod == 0.
+	DefaultDrcomLogoutURL = "http://10.2.5.251/drcom/logout"
+
 	// PrimaryProbeURL is the Microsoft NCSI connect test URL used as the primary probe target.
 	PrimaryProbeURL = "http://www.msftconnecttest.com/connecttest.txt"
 

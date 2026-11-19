@@ -482,3 +482,153 @@ func TestSilentProbeDoesNotHijackWhenBackoffExpiresMidProbe(t *testing.T) {
 		t.Fatalf("expected zero log spam, got: %s", logBuf.String())
 	}
 }
+
+func TestContinuingEduSubnetAuthenticatesWithInterfaceMAC(t *testing.T) {
+	var loginURL string
+	authenticated := false
+	p := portal.NewClient(config.Config{
+		Account:    "TS26170082",
+		Password:   "pass",
+		Operator:   config.OperatorCMCC,
+		CampusMode: campus.Auto,
+	})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "10.2.5.251:801" && r.URL.Query().Get("a") == "login" {
+			loginURL = r.URL.String()
+			authenticated = true
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`dr1003({"result":1})`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if authenticated && strings.Contains(r.URL.Path, "connecttest.txt") {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("Microsoft Connect Test")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if strings.Contains(r.URL.Path, "connecttest.txt") {
+			h := make(http.Header)
+			h.Set("Location", "http://10.2.5.251/a79.htm?wlanuserip=10.27.176.53&wlanacname=AC_JXJY")
+			return &http.Response{
+				StatusCode: 302,
+				Header:     h,
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+		return nil, errors.New("offline")
+	}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+
+	pol := defaultPolicy
+	pol.LinkDebounce = time.Millisecond
+	pol.PostAuthVerifyAttempts = 1
+	pol.PostAuthVerifyInterval = time.Millisecond
+	c := &controller{
+		policy: pol,
+		portal: p,
+		cfg: config.Config{
+			Account:    "TS26170082",
+			Password:   "pass",
+			Operator:   config.OperatorCMCC,
+			CampusMode: campus.Auto,
+		},
+		link: network.LinkState{
+			Index: 1,
+			Up:    true,
+			Kind:  "wifi",
+			SSID:  "CUMT_Stu",
+			IPv4:  "10.27.176.53",
+			MAC:   "AA-BB-CC-DD-EE-FF",
+		},
+		readLink: func(prev network.LinkState) network.LinkState {
+			return prev
+		},
+		logger:     log.New(io.Discard, "", 0),
+		backoff:    defaultPolicy.RetryBase,
+		retryTimer: time.NewTimer(time.Hour),
+		nextReset:  time.Now().Add(24 * time.Hour),
+	}
+	defer stopTimer(c.retryTimer)
+
+	err := c.cycle(context.Background(), "切换账号重连")
+	if err != nil {
+		t.Fatalf("expected ContinuingEdu 10.27.x.x campus link to authenticate, got %v", err)
+	}
+	if !strings.Contains(loginURL, "wlan_user_ip=10.27.176.53") ||
+		!strings.Contains(loginURL, "wlan_user_mac=AABBCCDDEEFF") ||
+		!strings.Contains(loginURL, "wlan_ac_name=AC_JXJY") {
+		t.Fatalf("unexpected login query for ContinuingEdu campus: %s", loginURL)
+	}
+	if c.campus != campus.ContinuingEdu || c.state != "online" {
+		t.Fatalf("expected ContinuingEdu online state, got campus=%q state=%q", c.campus, c.state)
+	}
+}
+
+func TestUnknownSubnetRejectedWithoutFallback(t *testing.T) {
+	loginAttempted := false
+	p := portal.NewClient(config.Config{
+		Account:    "TS26170082",
+		Password:   "pass",
+		Operator:   config.OperatorCMCC,
+		CampusMode: campus.Auto,
+	})
+	p.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "10.2.5.251:801" && r.URL.Query().Get("a") == "login" {
+			loginAttempted = true
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`dr1003({"result":1})`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		if strings.Contains(r.URL.Path, "connecttest.txt") {
+			h := make(http.Header)
+			h.Set("Location", "http://10.2.5.251/a79.htm?wlanuserip=10.99.1.2")
+			return &http.Response{
+				StatusCode: 302,
+				Header:     h,
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+		return nil, errors.New("offline")
+	}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+
+	pol := defaultPolicy
+	pol.LinkDebounce = time.Millisecond
+	c := &controller{
+		policy: pol,
+		portal: p,
+		cfg: config.Config{
+			Account:    "TS26170082",
+			Password:   "pass",
+			Operator:   config.OperatorCMCC,
+			CampusMode: campus.Auto,
+		},
+		link: network.LinkState{
+			Index: 1,
+			Up:    true,
+			Kind:  "wifi",
+			SSID:  "CUMT_Stu",
+			IPv4:  "10.99.1.2",
+			MAC:   "AA-BB-CC-DD-EE-FF",
+		},
+		readLink: func(prev network.LinkState) network.LinkState {
+			return prev
+		},
+		logger:     log.New(io.Discard, "", 0),
+		backoff:    defaultPolicy.RetryBase,
+		retryTimer: time.NewTimer(time.Hour),
+		nextReset:  time.Now().Add(24 * time.Hour),
+	}
+	defer stopTimer(c.retryTimer)
+
+	err := c.cycle(context.Background(), "切换账号重连")
+	if err == nil {
+		t.Fatal("expected uncatalogued 10.99.1.2 subnet to fail without generic fallback")
+	}
+	if loginAttempted {
+		t.Fatal("unknown subnet must not submit credentials via generic fallback")
+	}
+}

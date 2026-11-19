@@ -306,7 +306,11 @@ func (p *Client) probeDirectPortal(ctx context.Context) string {
 }
 
 func (p *Client) buildPortalActionURL(action string, site campus.Campus, portal, currentIP, currentMAC string) (string, error) {
-	if site != campus.Wenchang && site != campus.Nanhu {
+	return p.buildPortalActionURLWithMAC(action, site, portal, currentIP, currentMAC, site == campus.Wenchang || site == campus.ContinuingEdu)
+}
+
+func (p *Client) buildPortalActionURLWithMAC(action string, site campus.Campus, portal, currentIP, currentMAC string, useInterfaceMAC bool) (string, error) {
+	if !campus.IsKnownCampus(site) {
 		return "", errors.New("校区未识别，不能发送账号密码")
 	}
 	if _, err := campus.ClassifyPortal(portal); err != nil {
@@ -315,7 +319,7 @@ func (p *Client) buildPortalActionURL(action string, site campus.Campus, portal,
 	p.mu.RLock()
 	cfg := p.cfg
 	p.mu.RUnlock()
-	// Both campuses use this backend. The a79 page is shared as well.
+	// All configured campuses share this backend. The a79 page is shared as well.
 	// Never derive a credential-bearing destination from an arbitrary redirect.
 	base, _ := url.Parse(DefaultBackendURL)
 	q := url.Values{}
@@ -336,10 +340,16 @@ func (p *Client) buildPortalActionURL(action string, site campus.Campus, portal,
 		return "", errors.New("没有可用的校园网 IPv4 地址")
 	}
 	account := cfg.AccountFor(site)
+	password := cfg.Password
+	if action == "logout" && strings.TrimSpace(cfg.Account) == "" {
+		// Matches official portal web JS (a42.js logout_portal) when no self account is configured.
+		account = "drcom"
+		password = "123"
+	}
 	mac := "000000000000"
 	if raw := strings.NewReplacer("-", "", ":", "").Replace(q.Get("mac")); len(raw) == 12 {
 		mac = raw
-	} else if site == campus.Wenchang {
+	} else if useInterfaceMAC {
 		if raw := strings.NewReplacer("-", "", ":", "").Replace(currentMAC); len(raw) == 12 {
 			mac = raw
 		}
@@ -351,11 +361,11 @@ func (p *Client) buildPortalActionURL(action string, site campus.Campus, portal,
 		fmt.Sprintf("callback=dr%d", stamp),
 		"login_method=1",
 		"user_account=" + account,
-		"user_password=" + url.QueryEscape(cfg.Password),
+		"user_password=" + url.QueryEscape(password),
 		"wlan_user_ip=" + ip,
 		"wlan_user_mac=" + mac,
 	}
-	if site == campus.Wenchang {
+	if site == campus.Wenchang || site == campus.ContinuingEdu {
 		if q.Get("wlanacname") != "" {
 			queryParts = append(queryParts, "wlan_ac_name="+url.QueryEscape(q.Get("wlanacname")))
 		}
@@ -368,54 +378,36 @@ func (p *Client) buildPortalActionURL(action string, site campus.Campus, portal,
 	return base.String(), nil
 }
 
-// Logout terminates the active campus portal session for the current IP.
-func (p *Client) Logout(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
-	actionURL, err := p.buildPortalActionURL("logout", site, portal, currentIP, currentMAC)
-	if err != nil {
-		return err
-	}
+func (p *Client) doPortalAction(ctx context.Context, actionURL, diagKind, actionName string, allowAlreadyOnline bool) error {
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, actionURL, nil)
-	resp, err := p.doDiagnostic(request, "logout")
+	resp, err := p.doDiagnostic(request, diagKind)
 	if err != nil {
-		return errors.New("注销接口不可达或请求超时")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("注销接口返回 HTTP %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
-	actionURL, err := p.buildPortalActionURL("login", site, portal, currentIP, currentMAC)
-	if err != nil {
-		return err
-	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, actionURL, nil)
-	resp, err := p.doDiagnostic(request, "login")
-	if err != nil {
-		return errors.New("认证接口不可达或请求超时")
+		return fmt.Errorf("%s接口不可达或请求超时", actionName)
 	} // Never log the URL containing credentials.
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("认证接口返回 HTTP %d", resp.StatusCode)
+		return fmt.Errorf("%s接口返回 HTTP %d", actionName, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 	if err != nil {
-		return errors.New("读取认证响应失败")
+		return fmt.Errorf("读取%s响应失败", actionName)
 	}
+	return parsePortalResult(body, actionName, allowAlreadyOnline)
+}
+
+func parsePortalResult(body []byte, actionName string, allowAlreadyOnline bool) error {
 	start, end := strings.IndexByte(string(body), '{'), strings.LastIndexByte(string(body), '}')
 	if start < 0 || end < start {
-		return errors.New("认证响应不是可识别的 JSONP")
+		return fmt.Errorf("%s响应不是可识别的 JSONP", actionName)
 	}
 	var result map[string]any
 	if err := json.Unmarshal(body[start:end+1], &result); err != nil {
-		return errors.New("认证响应 JSON 解析失败")
+		return fmt.Errorf("%s响应 JSON 解析失败", actionName)
 	}
 	if fmt.Sprint(result["result"]) == "1" || fmt.Sprint(result["result"]) == "ok" {
 		return nil
 	}
-	if fmt.Sprint(result["ret_code"]) == "2" {
+	if allowAlreadyOnline && fmt.Sprint(result["ret_code"]) == "2" {
 		return nil
 	} // "IP already online"; external probe remains authoritative.
 	msg := fmt.Sprint(result["msg"])
@@ -423,9 +415,46 @@ func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentI
 		msg = fmt.Sprint(result["message"])
 	}
 	if msg != "" && msg != "<nil>" {
-		return fmt.Errorf("认证未获成功响应（result=%v，ret_code=%v，msg=%s）", result["result"], result["ret_code"], decodePortalMessage(msg))
+		return fmt.Errorf("%s未获成功响应（result=%v，ret_code=%v，msg=%s）", actionName, result["result"], result["ret_code"], decodePortalMessage(msg))
 	}
-	return fmt.Errorf("认证未获成功响应（result=%v，ret_code=%v）", result["result"], result["ret_code"])
+	return fmt.Errorf("%s未获成功响应（result=%v，ret_code=%v）", actionName, result["result"], result["ret_code"])
+}
+
+// Logout terminates the active campus portal session for the current IP.
+// It checks the JSONP result payload and falls back to interface MAC and Dr.COM /drcom/logout when needed.
+func (p *Client) Logout(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
+	actionURL, err := p.buildPortalActionURL("logout", site, portal, currentIP, currentMAC)
+	if err != nil {
+		return err
+	}
+	err = p.doPortalAction(ctx, actionURL, "logout", "注销", false)
+	if err == nil {
+		return nil
+	}
+	// If Nanhu failed with zeroed MAC and we have a real interface MAC, retry once with interface MAC.
+	normalizedMAC := strings.NewReplacer("-", "", ":", "").Replace(currentMAC)
+	if site == campus.Nanhu && len(normalizedMAC) == 12 {
+		if altURL, altErr := p.buildPortalActionURLWithMAC("logout", site, portal, currentIP, currentMAC, true); altErr == nil && altURL != actionURL {
+			if retryErr := p.doPortalAction(ctx, altURL, "logout", "注销", false); retryErr == nil {
+				return nil
+			}
+		}
+	}
+	// Fallback to Dr.COM port-80 local IP logout (used by official a42.js when loginMethod == 0).
+	stamp := time.Now().UnixMilli()
+	drcomURL := fmt.Sprintf("%s?callback=dr%d&_=%d", DefaultDrcomLogoutURL, stamp, stamp)
+	if drcomErr := p.doPortalAction(ctx, drcomURL, "logout-drcom", "注销", false); drcomErr == nil {
+		return nil
+	}
+	return err
+}
+
+func (p *Client) Login(ctx context.Context, site campus.Campus, portal, currentIP, currentMAC string) error {
+	actionURL, err := p.buildPortalActionURL("login", site, portal, currentIP, currentMAC)
+	if err != nil {
+		return err
+	}
+	return p.doPortalAction(ctx, actionURL, "login", "认证", true)
 }
 
 func decodePortalMessage(raw string) string {
